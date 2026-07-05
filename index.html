@@ -575,7 +575,8 @@ function doJoinCrew(){
     saveIdentity();
     attachListener();
     render();
-  }).catch(()=>{
+  }).catch((err)=>{
+    console.error('Failed to join crew:', err);
     state.joinError = 'Something went wrong — try again.';
     render();
   });
@@ -1092,10 +1093,11 @@ function cropToSquareJpeg(imgSrc, size, cb){
     try{
       cb(canvas.toDataURL('image/jpeg', 0.85));
     }catch(e){
+      console.error('Failed to crop photo:', e);
       cb(null);
     }
   };
-  img.onerror = () => cb(null);
+  img.onerror = (e) => { console.error('Failed to load photo for cropping:', e); cb(null); };
   img.src = imgSrc;
 }
 
