@@ -347,6 +347,36 @@ function getTodayIndex(){
   const idx = FEST_DATES.indexOf(iso);
   return idx >= 0 ? idx : state.day;
 }
+function actStart(act){
+  return new Date(new Date(FEST_DATES[act[1]]+'T00:00:00').getTime() + normMin(act[2])*60000);
+}
+function actEnd(act){
+  return new Date(new Date(FEST_DATES[act[1]]+'T00:00:00').getTime() + normMin(act[3])*60000);
+}
+function formatCountdown(ms){
+  if(ms <= 0) return 'now';
+  const totalMin = Math.round(ms/60000);
+  const d = Math.floor(totalMin/1440);
+  const h = Math.floor((totalMin%1440)/60);
+  const m = totalMin%60;
+  if(d>0) return `${d}d ${h}h`;
+  if(h>0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function getNowAndNextPick(){
+  const now = new Date();
+  let current = null, next = null;
+  myPicksList().forEach(p=>{
+    const act = ACTS[p.actIdx];
+    const s = actStart(act), e = actEnd(act);
+    if(s <= now && now < e){
+      if(!current || s < actStart(ACTS[current.actIdx])) current = p;
+    } else if(s > now){
+      if(!next || s < actStart(ACTS[next.actIdx])) next = p;
+    }
+  });
+  return {current, next};
+}
 
 /* ---------------------------------------------------------------------
    State
@@ -921,8 +951,37 @@ function allCrewPickedActIdxs(){
   }
   return [...set];
 }
+function renderNextUpCard(){
+  const {current, next} = getNowAndNextPick();
+  if(!current && !next) return '';
+  const now = new Date();
+  let html = '';
+  if(current){
+    const act = ACTS[current.actIdx];
+    html += `
+    <div class="live-status" style="margin-bottom:10px;">
+      <div>
+        <strong>HAPPENING NOW</strong>
+        <div class="plan-title" style="margin-top:2px;">${escapeHtml(act[4])}</div>
+        <div class="chip">${escapeHtml(STAGES[act[0]])} &middot; ends in ${formatCountdown(actEnd(act)-now)}</div>
+      </div>
+    </div>`;
+  }
+  if(next){
+    const act = ACTS[next.actIdx];
+    html += `
+    <div class="live-card" style="margin-bottom:10px;">
+      <div class="field-label">Next up</div>
+      <div class="plan-title">${escapeHtml(act[4])}</div>
+      <div class="chip">${escapeHtml(STAGES[act[0]])} &middot; ${act[2]}</div>
+      <div class="plan-time" style="margin-top:6px;">in ${formatCountdown(actStart(act)-now)}</div>
+    </div>`;
+  }
+  return html;
+}
 function renderPlanTab(){
   const mode = state.planMode || 'mine';
+  const nextUp = mode==='mine' ? renderNextUpCard() : '';
   const modeToggle = `
     <div class="viewtoggle" style="margin-bottom:10px;">
       <button class="${mode==='mine'?'active':''}" data-action="set-plan-mode" data-mode="mine">Mine</button>
@@ -956,7 +1015,7 @@ function renderPlanTab(){
     });
     return html;
   })();
-  return `${modeToggle}${renderDayPills('plan', true)}${body}`;
+  return `${nextUp}${modeToggle}${renderDayPills('plan', true)}${body}`;
 }
 function renderPlanItem(actIdx, clashSet, mode){
   const act = ACTS[actIdx];
@@ -1393,7 +1452,7 @@ document.addEventListener('click', function(e){
 loadIdentity();
 if(state.userId && state.code) attachListener();
 render();
-setInterval(()=>{ if(state.tab==='live' && !state.sheet) render(); }, 30000);
+setInterval(()=>{ if((state.tab==='live' || state.tab==='plan') && !state.sheet) render(); }, 30000);
 </script>
 </body>
 </html>
