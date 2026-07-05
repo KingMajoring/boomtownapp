@@ -150,13 +150,13 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .sched-hours{position:relative;height:30px;border-bottom:1px solid var(--border);}
 .sched-hour-mark{position:absolute;top:0;bottom:0;padding-left:6px;display:flex;align-items:center;font-family:var(--font-head);font-size:12px;color:var(--text-dim);border-left:1px solid var(--border);}
 .sched-body{position:relative;}
-.sched-row{display:flex;height:50px;border-bottom:1px solid var(--border);}
+.sched-row{display:flex;min-height:50px;border-bottom:1px solid var(--border);}
 .sched-row:last-child{border-bottom:none;}
 .sched-label{position:sticky;left:0;z-index:2;width:92px;flex:0 0 92px;background:var(--bg2);display:flex;align-items:center;gap:6px;padding:0 8px;border-right:1px solid var(--border);}
 .sched-label span{font-family:var(--font-head);font-size:11.5px;text-transform:uppercase;line-height:1.15;letter-spacing:.2px;}
-.sched-track{position:relative;}
-.sched-block{position:absolute;top:5px;bottom:5px;border-radius:7px;padding:4px 7px;overflow:hidden;border-left:3px solid;font-size:11.5px;line-height:1.2;font-weight:600;color:#fff;}
-.sched-block .avset{position:absolute;bottom:2px;right:3px;display:flex;}
+.sched-track{position:relative;background-image:repeating-linear-gradient(to right, rgba(255,255,255,.08) 0, rgba(255,255,255,.08) 1px, transparent 1px, transparent 114px);}
+.sched-block{position:absolute;border-radius:7px;padding:4px 7px 16px;border-left:3px solid;font-size:12px;line-height:1.25;font-weight:600;color:#fff;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.35);}
+.sched-block .avset{position:absolute;bottom:3px;right:3px;display:flex;}
 
 /* bottom sheet */
 .sheet-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:flex;align-items:flex-end;justify-content:center;}
@@ -293,9 +293,9 @@ function stageColor(idx){
   const hue = (idx*137.5) % 360;
   return `hsl(${hue.toFixed(0)},62%,52%)`;
 }
-function stageColorDim(idx){
+function stageColorFill(idx){
   const hue = (idx*137.5) % 360;
-  return `hsla(${hue.toFixed(0)},62%,52%,.22)`;
+  return `hsl(${hue.toFixed(0)},50%,28%)`;
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -765,6 +765,30 @@ function renderSetRow(actIdx, act, showDay){
    Schedule grid
    --------------------------------------------------------------------- */
 const PX_PER_MIN = 1.9;
+const LANE_HEIGHT = 58;
+function assignLanes(dayItems){
+  const sorted = dayItems.slice().sort((a,b)=>normMin(a.a[2])-normMin(b.a[2]));
+  const laneEnds = []; // normalized end minute currently occupying each lane
+  const withLane = [];
+  sorted.forEach(x=>{
+    const s = normMin(x.a[2]), e = normMin(x.a[3]);
+    let lane = laneEnds.findIndex(end => end <= s);
+    if(lane === -1){ lane = laneEnds.length; laneEnds.push(e); }
+    else { laneEnds[lane] = e; }
+    withLane.push({...x, lane});
+  });
+  // cap each item's usable width to the gap before the next item in its own lane,
+  // so the minimum-width floor on very short sets can't visually bleed into a neighbour
+  const byLane = {};
+  withLane.forEach(x => (byLane[x.lane] = byLane[x.lane] || []).push(x));
+  Object.values(byLane).forEach(laneItems => {
+    laneItems.forEach((x, i) => {
+      const next = laneItems[i+1];
+      x.maxEnd = next ? normMin(next.a[2]) : Infinity;
+    });
+  });
+  return {items: withLane, laneCount: laneEnds.length};
+}
 function renderScheduleGrid(){
   const items = actsForDay(state.day);
   if(!items.length) return `<div class="empty-state">No sets on this day.</div>`;
@@ -793,19 +817,23 @@ function renderScheduleGrid(){
 
   let rows = '';
   stageIdxs.forEach(si=>{
-    const blocks = byStage[si].map(x=>{
+    const {items: laned, laneCount} = assignLanes(byStage[si]);
+    const rowHeight = laneCount * LANE_HEIGHT;
+    const blocks = laned.map(x=>{
       const s = normMin(x.a[2]), e = normMin(x.a[3]);
       const left = (s-gridStart)*PX_PER_MIN;
-      const width = Math.max((e-s)*PX_PER_MIN, 30);
+      const width = Math.min(Math.max((e-s)*PX_PER_MIN, 34), Math.max((x.maxEnd-s)*PX_PER_MIN, 6));
+      const top = x.lane*LANE_HEIGHT + 4;
+      const height = LANE_HEIGHT - 8;
       const tag = myTagFor(x.i);
-      const ring = tag==='must' ? 'box-shadow:0 0 0 2px var(--gold) inset;' : (tag==='maybe' ? 'box-shadow:0 0 0 2px var(--blue) inset;' : '');
+      const ring = tag==='must' ? 'box-shadow:0 1px 3px rgba(0,0,0,.35),0 0 0 2px var(--gold) inset;' : (tag==='maybe' ? 'box-shadow:0 1px 3px rgba(0,0,0,.35),0 0 0 2px var(--blue) inset;' : '');
       const avatars = renderTaggerAvatars(x.i);
-      return `<div class="sched-block" data-action="open-detail" data-act="${x.i}" style="left:${left}px;width:${width}px;background:${stageColorDim(si)};border-left-color:${stageColor(si)};${ring}">
+      return `<div class="sched-block" data-action="open-detail" data-act="${x.i}" style="left:${left}px;width:${width}px;top:${top}px;height:${height}px;background:${stageColorFill(si)};border-left-color:${stageColor(si)};${ring}">
         ${escapeHtml(x.a[4])}
         <div class="avset">${avatars}</div>
       </div>`;
     }).join('');
-    rows += `<div class="sched-row">
+    rows += `<div class="sched-row" style="height:${rowHeight}px">
       <div class="sched-label"><span class="dot" style="background:${stageColor(si)};width:9px;height:9px;border-radius:50%;flex-shrink:0;display:inline-block;"></span><span>${escapeHtml(STAGES[si])}</span></div>
       <div class="sched-track" style="width:${timelineWidth}px">${blocks}</div>
     </div>`;
