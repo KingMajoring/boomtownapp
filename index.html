@@ -133,6 +133,13 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .tagbtn.must-inactive{border-color:var(--gold);color:var(--gold);}
 .tagbtn.maybe-active{background:var(--blue);border-color:var(--blue);color:#0d1c30;}
 .tagbtn.maybe-inactive{border-color:var(--blue);color:var(--blue);}
+.listenbtn{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;border:1.5px solid var(--border);background:transparent;flex-shrink:0;}
+.listenbtn svg{width:14px;height:14px;}
+.listenbtn.spotify{border-color:#1DB954;color:#1DB954;}
+.listenbtn.youtube{border-color:#FF3B30;color:#FF3B30;}
+.listenbtn.lg{width:40px;height:40px;}
+.listenbtn.lg svg{width:20px;height:20px;}
+.listen-row{display:flex;gap:10px;margin:12px 0 4px;}
 
 .empty-state{text-align:center;color:var(--text-dim);padding:50px 20px;font-size:14px;line-height:1.6;}
 
@@ -292,6 +299,19 @@ function stageColorDim(idx){
 }
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function spotifySearchUrl(name){
+  return `https://open.spotify.com/search/${encodeURIComponent(name)}`;
+}
+function youtubeSearchUrl(name){
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}`;
+}
+function iconSpotify(){return `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.59 14.44c-.18.29-.56.38-.85.2-2.33-1.42-5.26-1.74-8.72-.96-.33.08-.67-.13-.75-.46-.08-.33.13-.67.46-.75 3.79-.87 7.04-.5 9.66 1.12.29.18.38.56.2.85zm1.22-2.72c-.23.36-.7.48-1.06.25-2.67-1.64-6.73-2.12-9.89-1.16-.41.12-.84-.11-.96-.52-.12-.41.11-.84.52-.96 3.61-1.1 8.09-.56 11.14 1.32.36.23.48.7.25 1.07zm.11-2.83c-3.2-1.9-8.48-2.08-11.53-1.15-.49.15-1-.13-1.15-.61-.15-.49.13-1 .61-1.15 3.5-1.06 9.31-.86 12.98 1.32.44.26.58.83.32 1.26-.26.43-.83.57-1.23.33z"/></svg>`;}
+function iconYoutube(){return `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.58 7.2c-.23-.86-.91-1.54-1.77-1.77C18.25 5 12 5 12 5s-6.25 0-7.81.43c-.86.23-1.54.91-1.77 1.77C2 8.76 2 12 2 12s0 3.24.42 4.8c.23.86.91 1.54 1.77 1.77C5.75 19 12 19 12 19s6.25 0 7.81-.43c.86-.23 1.54-.91 1.77-1.77C22 15.24 22 12 22 12s0-3.24-.42-4.8zM10 15.5v-7l6 3.5-6 3.5z"/></svg>`;}
+function renderListenLinks(name, size){
+  const cls = size==='lg' ? 'listenbtn lg' : 'listenbtn';
+  return `<a class="${cls} spotify" href="${spotifySearchUrl(name)}" target="_blank" rel="noopener noreferrer" title="Search Spotify" onclick="event.stopPropagation()">${iconSpotify()}</a>` +
+         `<a class="${cls} youtube" href="${youtubeSearchUrl(name)}" target="_blank" rel="noopener noreferrer" title="Search YouTube" onclick="event.stopPropagation()">${iconYoutube()}</a>`;
 }
 function initials(name){
   if(!name) return '?';
@@ -734,6 +754,7 @@ function renderSetRow(actIdx, act, showDay){
       <div class="set-foot">
         <button class="tagbtn ${tag==='must'?'must-active':'must-inactive'}" data-action="tag-act" data-act="${actIdx}" data-tag="must">MUST</button>
         <button class="tagbtn ${tag==='maybe'?'maybe-active':'maybe-inactive'}" data-action="tag-act" data-act="${actIdx}" data-tag="maybe">MAYBE</button>
+        ${renderListenLinks(act[4])}
         ${avatars}
       </div>
     </div>
@@ -815,6 +836,7 @@ function renderDetailSheet(actIdx){
     <div class="sheet-handle"></div>
     <div class="sheet-title">${escapeHtml(act[4])}</div>
     <div class="sheet-sub">${escapeHtml(STAGES[act[0]])} &middot; ${DAY_LABELS[act[1]]} &middot; ${act[2]}&ndash;${act[3]}</div>
+    <div class="listen-row">${renderListenLinks(act[4], 'lg')}</div>
     ${avatars}
     <div class="bigtag-row">
       <button class="bigtag must ${tag==='must'?'active':''}" data-action="tag-act" data-act="${actIdx}" data-tag="must">MUST SEE</button>
