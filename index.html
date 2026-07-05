@@ -398,27 +398,36 @@ function myTagFor(actIdx){
 }
 function setMyPick(actIdx, tag){
   if(!FB_READY) return;
+  const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
+  me.picks = me.picks || {};
+  if(tag) me.picks['a'+actIdx] = tag; else delete me.picks['a'+actIdx];
   const path = `crews/${state.code}/users/${state.userId}`;
   db.ref(path).update({
     ['picks/a'+actIdx]: tag,
     name: state.name,
     updated: firebase.database.ServerValue.TIMESTAMP
-  });
+  }).catch(err => console.error('Failed to save pick:', err));
 }
 function setLive(payload){
   if(!FB_READY) return;
+  const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
+  me.live = payload;
   db.ref(`crews/${state.code}/users/${state.userId}`).update({
     live: payload,
     updated: firebase.database.ServerValue.TIMESTAMP
-  });
+  }).catch(err => console.error('Failed to update live status:', err));
 }
 function setPhoto(dataUrl){
   if(!FB_READY) return;
-  db.ref(`crews/${state.code}/users/${state.userId}`).update({photo: dataUrl});
+  const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
+  me.photo = dataUrl;
+  db.ref(`crews/${state.code}/users/${state.userId}`).update({photo: dataUrl})
+    .catch(err => console.error('Failed to save photo:', err));
 }
 function leaveCrewRemote(){
   if(!FB_READY) return;
-  db.ref(`crews/${state.code}/users/${state.userId}`).remove();
+  db.ref(`crews/${state.code}/users/${state.userId}`).remove()
+    .catch(err => console.error('Failed to leave crew:', err));
 }
 
 /* ---------------------------------------------------------------------
@@ -542,8 +551,10 @@ function doStartCrew(){
   const code = genCode();
   state.code = code;
   state.userId = genUserId();
-  db.ref(`crews/${code}/group`).set({created: firebase.database.ServerValue.TIMESTAMP, by: state.userId});
-  db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP});
+  db.ref(`crews/${code}/group`).set({created: firebase.database.ServerValue.TIMESTAMP, by: state.userId})
+    .catch(err => console.error('Failed to create crew:', err));
+  db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
+    .catch(err => console.error('Failed to create user:', err));
   saveIdentity();
   attachListener();
   render();
@@ -559,7 +570,8 @@ function doJoinCrew(){
     state.userId = genUserId();
     state.code = code;
     state.joinError = '';
-    db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP});
+    db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
+      .catch(err => console.error('Failed to join crew:', err));
     saveIdentity();
     attachListener();
     render();
