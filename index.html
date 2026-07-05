@@ -366,6 +366,7 @@ const state = {
   search: '',
   openStages: new Set(),
   planDay: 'all',        // 'all' or 0-4
+  planMode: 'mine',      // 'mine' or 'crew'
   heatDay: 'all',
   sheet: null,           // {type:'detail',actIdx} | {type:'clash',actIdxs:[]} | {type:'crew'} | {type:'photo'} | {type:'live-picker'}
   liveStagePick: null,
@@ -649,14 +650,14 @@ function renderAvatar(user, uid, sizeClass, ring){
   const cls = sizeClass==='lg' ? 'avatar lg' : (sizeClass==='sm2' ? 'avatar' : 'avatar sm');
   return `<div class="${cls} ${ringClass}" style="${style}" title="${escapeHtml(name)}">${photo?'':escapeHtml(initials(name))}</div>`;
 }
-function renderTaggerAvatars(actIdx){
+function renderTaggerAvatars(actIdx, excludeUid){
   const {must,maybe} = actTaggers(actIdx);
   const parts = [];
-  must.forEach(uid=>{
+  must.filter(uid=>uid!==excludeUid).forEach(uid=>{
     const u = state.crewUsers[uid]||{};
     parts.push(renderAvatar(u,uid,'sm','must'));
   });
-  maybe.forEach(uid=>{
+  maybe.filter(uid=>uid!==excludeUid).forEach(uid=>{
     const u = state.crewUsers[uid]||{};
     parts.push(renderAvatar(u,uid,'sm','maybe'));
   });
@@ -912,35 +913,56 @@ function renderClashSheet(actIdxs){
 /* ---------------------------------------------------------------------
    My Plan tab
    --------------------------------------------------------------------- */
-function renderPlanTab(){
-  const picks = myPicksList();
-  const clashSet = clashActIdxSet();
-  let filtered = picks;
-  if(state.planDay !== 'all'){
-    filtered = filtered.filter(p => ACTS[p.actIdx][1] === state.planDay);
+function allCrewPickedActIdxs(){
+  const set = new Set();
+  for(const uid in state.crewUsers){
+    const picks = state.crewUsers[uid].picks || {};
+    Object.keys(picks).forEach(k => { if(picks[k]) set.add(parseInt(k.slice(1),10)); });
   }
-  filtered.sort((x,y)=>{
-    const ax=ACTS[x.actIdx], ay=ACTS[y.actIdx];
+  return [...set];
+}
+function renderPlanTab(){
+  const mode = state.planMode || 'mine';
+  const modeToggle = `
+    <div class="viewtoggle" style="margin-bottom:10px;">
+      <button class="${mode==='mine'?'active':''}" data-action="set-plan-mode" data-mode="mine">Mine</button>
+      <button class="${mode==='crew'?'active':''}" data-action="set-plan-mode" data-mode="crew">Crew</button>
+    </div>`;
+
+  let actIdxs = mode==='mine' ? myPicksList().map(p=>p.actIdx) : allCrewPickedActIdxs();
+  if(state.planDay !== 'all'){
+    actIdxs = actIdxs.filter(idx => ACTS[idx][1] === state.planDay);
+  }
+  actIdxs.sort((x,y)=>{
+    const ax=ACTS[x], ay=ACTS[y];
     return ax[1]-ay[1] || normMin(ax[2])-normMin(ay[2]);
   });
+
+  const clashSet = mode==='mine' ? clashActIdxSet() : new Set();
+  const emptyMsg = mode==='mine'
+    ? 'No picks yet. Tag some acts as MUST or MAYBE from the Line-up tab.'
+    : 'Nobody in the crew has tagged any acts yet.';
+
   const body = (() => {
-    if(!filtered.length) return `<div class="empty-state">No picks yet. Tag some acts as MUST or MAYBE from the Line-up tab.</div>`;
+    if(!actIdxs.length) return `<div class="empty-state">${emptyMsg}</div>`;
     if(state.planDay !== 'all'){
-      return filtered.map(p => renderPlanItem(p, clashSet)).join('');
+      return actIdxs.map(idx => renderPlanItem(idx, clashSet, mode)).join('');
     }
     let html = '', lastDay = null;
-    filtered.forEach(p=>{
-      const d = ACTS[p.actIdx][1];
+    actIdxs.forEach(idx=>{
+      const d = ACTS[idx][1];
       if(d !== lastDay){ html += `<div class="day-header">${DAY_FULL[d]}</div>`; lastDay = d; }
-      html += renderPlanItem(p, clashSet);
+      html += renderPlanItem(idx, clashSet, mode);
     });
     return html;
   })();
-  return `${renderDayPills('plan', true)}${body}`;
+  return `${modeToggle}${renderDayPills('plan', true)}${body}`;
 }
-function renderPlanItem(p, clashSet){
-  const act = ACTS[p.actIdx];
-  const isClash = clashSet.has(p.actIdx);
+function renderPlanItem(actIdx, clashSet, mode){
+  const act = ACTS[actIdx];
+  const isClash = clashSet.has(actIdx);
+  const myTag = myTagFor(actIdx);
+  const avatars = renderTaggerAvatars(actIdx, mode==='mine' ? state.userId : null);
   return `
   <div class="plan-item ${isClash?'clash':''}">
     <div class="plan-top">
@@ -949,8 +971,12 @@ function renderPlanItem(p, clashSet){
         <div class="plan-title">${escapeHtml(act[4])}</div>
         <div class="chip">${escapeHtml(STAGES[act[0]])}</div>
       </div>
-      <span class="tagpill ${p.tag}">${p.tag.toUpperCase()}</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        ${myTag ? `<span class="tagpill ${myTag}">${myTag.toUpperCase()}</span>` : ''}
+        ${mode==='mine' ? `<button class="close-x" style="position:static;padding:2px 4px;" data-action="remove-pick" data-act="${actIdx}" title="Remove from my plan">&times;</button>` : ''}
+      </div>
     </div>
+    ${avatars}
     ${isClash ? `<div class="clash-flag" style="margin-top:8px;">&#9888; Clashes with another pick</div>` : ''}
   </div>`;
 }
@@ -1182,6 +1208,10 @@ document.addEventListener('click', function(e){
       state.day = parseInt(btn.dataset.day,10); render(); return;
     case 'set-plan-day':
       state.planDay = btn.dataset.day==='all' ? 'all' : parseInt(btn.dataset.day,10); render(); return;
+    case 'set-plan-mode':
+      state.planMode = btn.dataset.mode; render(); return;
+    case 'remove-pick':
+      setMyPick(parseInt(btn.dataset.act,10), null); render(); return;
     case 'set-heat-day':
       state.heatDay = btn.dataset.day==='all' ? 'all' : parseInt(btn.dataset.day,10); render(); return;
     case 'set-lineup-view':
