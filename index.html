@@ -232,6 +232,8 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .field-label{font-family:var(--font-head);font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;display:block;}
 .field-group{margin-bottom:12px;}
 .freshness{color:var(--text-dim2);font-size:11.5px;}
+.crew-map-slot{height:340px;border-radius:14px;overflow:hidden;background:var(--card2);border:1px solid var(--border);}
+.crew-map{width:100%;height:100%;}
 
 /* chat */
 .chat-thread{max-height:65vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:8px;}
@@ -300,6 +302,15 @@ const FIREBASE_CONFIG = {
   appId: "1:40912478731:web:b6a65954bcbc0aff0a5d0e"
 };
 const FB_READY = !!(FIREBASE_CONFIG.apiKey && typeof FIREBASE_CONFIG.apiKey === 'string' && !FIREBASE_CONFIG.apiKey.startsWith('PASTE_'));
+
+/* =====================================================================
+   PASTE YOUR GOOGLE MAPS API KEY BELOW to enable the crew location map
+   (Live tab -> Map view). Restrict the key to your domain in Google
+   Cloud Console: APIs & Services -> Credentials -> the key -> Website
+   restrictions -> add https://kingmajoring.github.io/*
+   ===================================================================== */
+const GOOGLE_MAPS_API_KEY = "PASTE_YOUR_GOOGLE_MAPS_API_KEY_HERE";
+const MAPS_READY = !!(GOOGLE_MAPS_API_KEY && !GOOGLE_MAPS_API_KEY.startsWith('PASTE_'));
 
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -509,6 +520,9 @@ const state = {
   chatDraft: '',
   chatMentionQuery: null,
   removedNotice: null,
+  liveView: 'list',      // 'list' | 'map'
+  sharingLocation: false,
+  locationError: null,
 };
 
 function loadIdentity(){
@@ -587,6 +601,9 @@ function detachListeners(){
   if(groupRef){ groupRef.off(); groupRef = null; }
   if(chatRef){ chatRef.off(); chatRef = null; }
   state.chatMessages = {};
+  clearGeoWatch();
+  crewMapInstance = null;
+  crewMapMarkers = {};
 }
 function signInWithGoogle(){
   if(!FB_READY) return;
@@ -665,6 +682,7 @@ function recoverUnindexedCrews(){
 function switchToCrew(code){
   if(!code) return;
   if(state.crewEntered && code === state.code) return;
+  clearGeoWatch();
   state.code = code;
   state.crewUsers = {};
   state.groupOwner = null;
@@ -816,6 +834,128 @@ function setPhoto(dataUrl){
   db.ref(`crews/${state.code}/users/${state.userId}`).update({photo: dataUrl})
     .catch(err => console.error('Failed to save photo:', err));
 }
+let geoWatchId = null;
+let lastGeoWriteAt = 0;
+function startSharingLocation(){
+  if(!FB_READY || !navigator.geolocation) return;
+  state.locationError = null;
+  geoWatchId = navigator.geolocation.watchPosition(
+    pos => {
+      state.sharingLocation = true;
+      state.locationError = null;
+      const now = Date.now();
+      if(now - lastGeoWriteAt < 15000) { render(); return; }
+      lastGeoWriteAt = now;
+      const geo = {lat: pos.coords.latitude, lng: pos.coords.longitude, updated: firebase.database.ServerValue.TIMESTAMP};
+      const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
+      me.geo = {lat: geo.lat, lng: geo.lng, updated: now};
+      db.ref(`crews/${state.code}/users/${state.userId}`).update({geo})
+        .catch(err => console.error('Failed to update location:', err));
+      render();
+    },
+    err => {
+      state.sharingLocation = false;
+      state.locationError = err.message || 'Could not get your location.';
+      render();
+    },
+    {enableHighAccuracy: true, maximumAge: 10000, timeout: 15000}
+  );
+}
+function stopSharingLocation(){
+  if(geoWatchId != null && navigator.geolocation){
+    navigator.geolocation.clearWatch(geoWatchId);
+    geoWatchId = null;
+  }
+  state.sharingLocation = false;
+  const me = state.crewUsers[state.userId];
+  if(me) me.geo = null;
+  if(FB_READY && state.code){
+    db.ref(`crews/${state.code}/users/${state.userId}`).update({geo: null})
+      .catch(err => console.error('Failed to stop sharing location:', err));
+  }
+}
+function clearGeoWatch(){
+  if(geoWatchId != null && navigator.geolocation){
+    navigator.geolocation.clearWatch(geoWatchId);
+    geoWatchId = null;
+  }
+  state.sharingLocation = false;
+}
+
+/* ---------------------------------------------------------------------
+   Crew location map (Google Maps, lazy-loaded)
+   --------------------------------------------------------------------- */
+let mapsLoadState = 'idle'; // idle | loading | loaded
+let mapsLoadCallbacks = [];
+function ensureGoogleMapsLoaded(cb){
+  if(mapsLoadState === 'loaded'){ cb(); return; }
+  mapsLoadCallbacks.push(cb);
+  if(mapsLoadState === 'loading') return;
+  mapsLoadState = 'loading';
+  window.__onGoogleMapsLoaded = function(){
+    mapsLoadState = 'loaded';
+    mapsLoadCallbacks.forEach(fn => fn());
+    mapsLoadCallbacks = [];
+  };
+  const script = document.createElement('script');
+  script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(GOOGLE_MAPS_API_KEY)}&callback=__onGoogleMapsLoaded`;
+  script.async = true;
+  document.head.appendChild(script);
+}
+let persistentMapDiv = null;
+function getPersistentMapDiv(){
+  if(!persistentMapDiv){
+    persistentMapDiv = document.createElement('div');
+    persistentMapDiv.id = 'crewMapContainer';
+    persistentMapDiv.className = 'crew-map';
+  }
+  return persistentMapDiv;
+}
+let crewMapInstance = null;
+let crewMapMarkers = {};
+const DEFAULT_MAP_CENTER = {lat: 51.086, lng: -1.288}; // Matterley Bowl, Winchester - fallback before anyone shares
+function renderGoogleMapNow(){
+  if(!MAPS_READY) return;
+  const slot = document.getElementById('crewMapSlot');
+  if(!slot) return;
+  slot.appendChild(getPersistentMapDiv());
+  ensureGoogleMapsLoaded(() => {
+    if(!document.getElementById('crewMapSlot')) return; // tab changed while loading
+    if(!crewMapInstance){
+      const sharingUids = Object.keys(state.crewUsers).filter(uid => state.crewUsers[uid].geo);
+      const center = sharingUids.length
+        ? {lat: state.crewUsers[sharingUids[0]].geo.lat, lng: state.crewUsers[sharingUids[0]].geo.lng}
+        : DEFAULT_MAP_CENTER;
+      crewMapInstance = new google.maps.Map(persistentMapDiv, {
+        center, zoom: 16, mapTypeControl: false, streetViewControl: false, fullscreenControl: false
+      });
+    } else {
+      google.maps.event.trigger(crewMapInstance, 'resize');
+    }
+    updateCrewMapMarkers();
+  });
+}
+function updateCrewMapMarkers(){
+  if(!crewMapInstance) return;
+  const sharingUids = Object.keys(state.crewUsers).filter(uid => state.crewUsers[uid].geo);
+  Object.keys(crewMapMarkers).forEach(uid => {
+    if(!sharingUids.includes(uid)){ crewMapMarkers[uid].setMap(null); delete crewMapMarkers[uid]; }
+  });
+  sharingUids.forEach(uid => {
+    const u = state.crewUsers[uid];
+    const pos = {lat: u.geo.lat, lng: u.geo.lng};
+    if(crewMapMarkers[uid]){
+      crewMapMarkers[uid].setPosition(pos);
+    } else {
+      crewMapMarkers[uid] = new google.maps.Marker({
+        position: pos,
+        map: crewMapInstance,
+        label: (u.name || '?').charAt(0).toUpperCase(),
+        title: u.name || 'Crew member'
+      });
+    }
+  });
+}
 function setMyNote(actIdx, text){
   if(!FB_READY) return;
   const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
@@ -926,6 +1066,9 @@ function render(){
   if(state.tab === 'chat'){
     const thread = document.getElementById('chatThread');
     if(thread) thread.scrollTop = thread.scrollHeight;
+  }
+  if(state.tab === 'live' && state.liveView === 'map'){
+    renderGoogleMapNow();
   }
 }
 function renderLoadingScreen(){
@@ -1743,10 +1886,33 @@ function renderLiveTab(){
     <label class="upload-label">${state.liveTempPhoto ? 'Change photo' : 'Add a quick photo'}<input type="file" id="liveFileInput" accept="image/*"></label>
     <button class="btn primary block" data-action="do-checkin" ${stagePick==null?'disabled':''}>Check in</button>
   </div>
-  <div class="section-title">Crew right now</div>
-  ${renderLiveCrewCards()}
+  ${MAPS_READY ? `
+  <div class="live-card">
+    <div class="field-label">Share your location</div>
+    ${state.sharingLocation
+      ? `<button class="btn block" data-action="stop-sharing-location">Stop sharing my location</button>`
+      : `<button class="btn primary block" data-action="start-sharing-location">Share my location with crew</button>`}
+    ${state.locationError ? `<div class="err-text">${escapeHtml(state.locationError)}</div>` : ''}
+  </div>` : ''}
+  <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;">
+    <span>Crew right now</span>
+    ${MAPS_READY ? `
+    <div class="viewtoggle" style="margin:0;">
+      <button class="${state.liveView==='list'?'active':''}" data-action="set-live-view" data-view="list">List</button>
+      <button class="${state.liveView==='map'?'active':''}" data-action="set-live-view" data-view="map">Map</button>
+    </div>` : ''}
+  </div>
+  ${(state.liveView==='map' && MAPS_READY) ? renderCrewMap() : renderLiveCrewCards()}
   `;
   return html;
+}
+function renderCrewMap(){
+  const sharingUids = Object.keys(state.crewUsers).filter(uid => state.crewUsers[uid].geo);
+  const names = sharingUids.map(uid => (state.crewUsers[uid].name || '?') + (uid===state.userId ? ' (you)' : '')).join(', ');
+  return `
+  <div id="crewMapSlot" class="crew-map-slot"></div>
+  <div class="freshness" style="margin-top:8px;">${sharingUids.length ? 'Sharing: '+escapeHtml(names) : 'Nobody is sharing their location yet.'}</div>
+  `;
 }
 function renderLiveCrewCards(){
   const uids = Object.keys(state.crewUsers).filter(uid => state.crewUsers[uid].live && state.crewUsers[uid].live.stage != null);
@@ -1767,6 +1933,7 @@ function renderLiveCrewCards(){
         <div class="chip"><span class="dot" style="background:${stageColor(u.live.stage)};width:8px;height:8px;"></span>${escapeHtml(stageName)}</div>
         ${watching?`<div class="freshness">Watching: ${escapeHtml(watching)}</div>`:''}
         <div class="freshness">${timeAgo(u.live.since)}</div>
+        ${u.geo ? `<div class="freshness">Sharing location</div>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -2239,6 +2406,12 @@ document.addEventListener('click', function(e){
       render();
       return;
     }
+    case 'set-live-view':
+      state.liveView = btn.dataset.view; render(); return;
+    case 'start-sharing-location':
+      startSharingLocation(); render(); return;
+    case 'stop-sharing-location':
+      stopSharingLocation(); render(); return;
     case 'tag-in-chat': {
       const nameToTag = btn.dataset.name;
       const input = document.getElementById('chatInput');
