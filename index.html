@@ -75,6 +75,7 @@ h1,h2,h3{margin:0;font-family:var(--font-head);font-weight:700;}
 .btn.ghost{background:transparent;}
 .btn.block{width:100%;}
 .err-text{color:var(--red);font-size:13px;min-height:16px;}
+.removed-notice{background:var(--card);border:1px solid var(--red);color:var(--red);border-radius:10px;padding:10px 12px;font-size:13px;text-align:left;}
 .code-input{font-family:var(--font-head);letter-spacing:8px;text-align:center;font-size:26px;text-transform:uppercase;}
 .link-btn{background:none;border:none;color:var(--text-dim);font-size:14px;text-decoration:underline;padding:8px;}
 .install-help{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:left;display:flex;flex-direction:column;gap:8px;}
@@ -240,11 +241,18 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .chat-mention{color:var(--gold);font-weight:700;}
 .chat-msg.me .chat-mention{color:#1a1210;text-decoration:underline;}
 .chat-system{text-align:center;color:var(--text-dim);font-size:12px;padding:4px 0;}
+.chat-time-inline{color:var(--text-dim2);font-size:11px;}
+.chat-time{font-size:10.5px;color:var(--text-dim2);margin-top:3px;text-align:right;}
+.chat-msg.me .chat-time{color:#4a3416;}
 .chat-photo img{max-width:160px;border-radius:10px;margin-top:6px;display:block;}
 .chat-composer{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
 .chat-tagbar{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
-.chat-input-row{display:flex;gap:8px;}
+.chat-input-row{display:flex;gap:8px;position:relative;}
 .chat-input-row input{flex:1;}
+.chat-mention-suggestions{position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--card2);border:1px solid var(--border);border-radius:10px;overflow:hidden;z-index:5;}
+.chat-mention-suggestions:empty{display:none;}
+.chat-mention-suggestion{display:block;width:100%;text-align:left;padding:9px 12px;background:none;border:none;color:var(--text);font-size:14px;font-weight:600;border-bottom:1px solid var(--border);}
+.chat-mention-suggestion:last-child{border-bottom:none;}
 
 /* photo sheet */
 .photo-preview-wrap{display:flex;justify-content:center;margin-bottom:16px;}
@@ -496,6 +504,8 @@ const state = {
   groupOwner: null,
   chatMessages: {},
   chatDraft: '',
+  chatMentionQuery: null,
+  removedNotice: null,
 };
 
 function loadIdentity(){
@@ -534,14 +544,39 @@ function attachListener(){
   if(!FB_READY || !state.code) return;
   if(usersRef) usersRef.off();
   usersRef = db.ref(`crews/${state.code}/users`);
+  let sawSelf = false;
   usersRef.on('value', snap => {
-    state.crewUsers = snap.val() || {};
+    const val = snap.val() || {};
+    if(val[state.userId]){
+      sawSelf = true;
+    } else if(sawSelf){
+      // we were a confirmed member of this crew and now we're gone - the owner removed us
+      handleRemovedFromCrew();
+      return;
+    }
+    state.crewUsers = val;
     try{ localStorage.setItem('boomtown_crew_cache_'+state.code, JSON.stringify(state.crewUsers)); }catch(e){}
     render();
   });
   attachBingoListener();
   attachGroupListener();
   attachChatListener();
+}
+function handleRemovedFromCrew(){
+  const removedCode = state.code;
+  detachListeners();
+  if(state.myCrews) delete state.myCrews[removedCode];
+  if(state.userId){
+    db.ref(`profiles/${state.userId}/crews/${removedCode}`).remove().catch(()=>{});
+  }
+  state.code = null;
+  state.crewUsers = {};
+  state.groupOwner = null;
+  state.crewEntered = false;
+  state.sheet = null;
+  state.removedNotice = "You've been removed from that crew.";
+  saveIdentity();
+  render();
 }
 function detachListeners(){
   if(usersRef){ usersRef.off(); usersRef = null; }
@@ -976,12 +1011,17 @@ function renderJoinScreen(){
     </div>
   </div>`;
 }
+function renderRemovedNotice(){
+  if(!state.removedNotice) return '';
+  return `<div class="removed-notice">${escapeHtml(state.removedNotice)} <button class="link-btn" style="padding:0;" data-action="dismiss-removed-notice">Dismiss</button></div>`;
+}
 function renderChoiceScreen(){
   const hasCrews = Object.keys(state.myCrews||{}).length > 0;
   return `
   <div class="onboard">
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     <div class="onboard-card">
+      ${renderRemovedNotice()}
       <p style="color:var(--text-dim);font-size:14px;margin:0 0 4px;">Hey ${escapeHtml(state.name||'there')}!</p>
       <button class="big-btn primary" data-action="start-crew">
         <strong>Start a new crew</strong>
@@ -1025,6 +1065,7 @@ function renderSwitchScreen(){
   <div class="onboard">
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     <div class="onboard-card">
+      ${renderRemovedNotice()}
       <p style="color:var(--text-dim);font-size:14px;margin:0 0 4px;">Hey ${escapeHtml(state.name||'there')}!</p>
       <div class="list-card">${rows}</div>
       <button class="big-btn" data-action="show-choice">
@@ -1721,7 +1762,8 @@ function renderChatTab(){
   <div class="chat-composer">
     ${chips ? `<div class="chat-tagbar">${chips}</div>` : ''}
     <div class="chat-input-row">
-      <input id="chatInput" placeholder="Message your crew&hellip;" value="${escapeHtml(state.chatDraft||'')}" maxlength="300" autocomplete="off">
+      <div id="chatMentionSuggestions" class="chat-mention-suggestions"></div>
+      <input id="chatInput" placeholder="Message your crew&hellip; (@ to tag)" value="${escapeHtml(state.chatDraft||'')}" maxlength="300" autocomplete="off">
       <button class="btn primary" data-action="send-chat" ${(state.chatDraft||'').trim() ? '' : 'disabled'}>Send</button>
     </div>
   </div>`;
@@ -1729,8 +1771,9 @@ function renderChatTab(){
 function renderChatMessage(msg){
   const isMe = msg.uid === state.userId;
   const photoHtml = msg.photo ? `<div class="chat-photo"><img src="${msg.photo}"></div>` : '';
+  const timeHtml = `<div class="chat-time">${escapeHtml(formatClockTime(msg.at))}</div>`;
   if(msg.system){
-    return `<div class="chat-system">${renderChatText(msg.text)}${photoHtml}</div>`;
+    return `<div class="chat-system">${renderChatText(msg.text)} <span class="chat-time-inline">${escapeHtml(formatClockTime(msg.at))}</span>${photoHtml}</div>`;
   }
   return `
   <div class="chat-msg ${isMe?'me':''}">
@@ -1738,8 +1781,30 @@ function renderChatMessage(msg){
       ${!isMe?`<div class="chat-sender">${escapeHtml(msg.name||'?')}</div>`:''}
       <div class="chat-text">${renderChatText(msg.text)}</div>
       ${photoHtml}
+      ${timeHtml}
     </div>
   </div>`;
+}
+function updateChatMentionSuggestions(){
+  const box = document.getElementById('chatMentionSuggestions');
+  if(!box) return;
+  const q = state.chatMentionQuery;
+  if(q == null){ box.innerHTML = ''; return; }
+  const matches = Object.keys(state.crewUsers)
+    .filter(uid => uid !== state.userId)
+    .map(uid => (state.crewUsers[uid].name || '').trim())
+    .filter(name => name && name.toLowerCase().startsWith(q.toLowerCase()));
+  if(!matches.length){ box.innerHTML = ''; return; }
+  box.innerHTML = matches.map(name => `<button class="chat-mention-suggestion" data-action="pick-mention" data-name="${escapeHtml(name)}">@${escapeHtml(name)}</button>`).join('');
+}
+function formatClockTime(ts){
+  if(!ts) return '';
+  const d = new Date(ts);
+  let h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2,'0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if(h===0) h = 12;
+  return `${h}:${m} ${ampm}`;
 }
 function renderChatText(text){
   let html = escapeHtml(text);
@@ -1936,6 +2001,8 @@ document.addEventListener('click', function(e){
       state.onboardStep = 'choice'; render(); return;
     case 'back-to-switch':
       state.onboardStep = null; state.renamingCrewCode = null; render(); return;
+    case 'dismiss-removed-notice':
+      state.removedNotice = null; render(); return;
     case 'switch-to-crew':
       switchToCrew(btn.dataset.code); return;
     case 'rename-crew-label':
@@ -2122,9 +2189,17 @@ document.addEventListener('click', function(e){
       }
       return;
     }
-    case 'leave-live':
+    case 'leave-live': {
+      const me = myUser();
+      const wasAt = me.live && me.live.stage != null ? me.live.stage : null;
       state.liveTempPhoto = null;
-      setLive(null); render(); return;
+      setLive(null);
+      if(wasAt != null){
+        sendChatMessage(`${state.name} left ${STAGES[wasAt]}`, {system: true, mentions: []});
+      }
+      render();
+      return;
+    }
     case 'do-checkin': {
       const sel = document.getElementById('liveStageSelect');
       const actSel = document.getElementById('liveActSelect');
@@ -2146,9 +2221,34 @@ document.addEventListener('click', function(e){
       const needsSpace = current.length > 0 && !current.endsWith(' ');
       const updated = current + (needsSpace ? ' ' : '') + '@' + nameToTag + ' ';
       state.chatDraft = updated;
+      state.chatMentionQuery = null;
       if(input){ input.value = updated; input.focus(); }
+      updateChatMentionSuggestions();
       const sendBtn = document.querySelector('[data-action="send-chat"]');
       if(sendBtn) sendBtn.disabled = !updated.trim();
+      return;
+    }
+    case 'pick-mention': {
+      const input = document.getElementById('chatInput');
+      if(!input){ return; }
+      const name = btn.dataset.name;
+      const caret = input.selectionStart;
+      const val = input.value;
+      const atIdx = val.slice(0, caret).lastIndexOf('@');
+      if(atIdx !== -1){
+        const before = val.slice(0, atIdx);
+        const after = val.slice(caret);
+        const newVal = before + '@' + name + ' ' + after;
+        input.value = newVal;
+        state.chatDraft = newVal;
+        const newCaret = (before + '@' + name + ' ').length;
+        input.setSelectionRange(newCaret, newCaret);
+      }
+      state.chatMentionQuery = null;
+      updateChatMentionSuggestions();
+      input.focus();
+      const sendBtn = document.querySelector('[data-action="send-chat"]');
+      if(sendBtn) sendBtn.disabled = !input.value.trim();
       return;
     }
     case 'send-chat': {
@@ -2156,6 +2256,7 @@ document.addEventListener('click', function(e){
       const text = input ? input.value : state.chatDraft;
       sendChatMessage(text);
       state.chatDraft = '';
+      state.chatMentionQuery = null;
       render();
       return;
     }
@@ -2174,6 +2275,10 @@ document.addEventListener('input', function(e){
     state.chatDraft = e.target.value;
     const btn = document.querySelector('[data-action="send-chat"]');
     if(btn) btn.disabled = !state.chatDraft.trim();
+    const uptoCaret = e.target.value.slice(0, e.target.selectionStart);
+    const m = uptoCaret.match(/(?:^|\s)@([a-zA-Z0-9]*)$/);
+    state.chatMentionQuery = m ? m[1] : null;
+    updateChatMentionSuggestions();
     return;
   }
   if(e.target.id === 'searchInput'){
