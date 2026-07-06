@@ -78,6 +78,8 @@ h1,h2,h3{margin:0;font-family:var(--font-head);font-weight:700;}
 .code-input{font-family:var(--font-head);letter-spacing:8px;text-align:center;font-size:26px;text-transform:uppercase;}
 .link-btn{background:none;border:none;color:var(--text-dim);font-size:14px;text-decoration:underline;padding:8px;}
 .install-help{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:left;display:flex;flex-direction:column;gap:8px;}
+.list-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:4px 14px;text-align:left;}
+.list-card .member-row:last-child{border-bottom:none;}
 .install-step{font-size:13px;color:var(--text-dim);line-height:1.4;}
 .install-step b{color:var(--text);}
 
@@ -451,7 +453,10 @@ const state = {
   userId: null,
   name: null,
   code: null,
-  onboardStep: 'choice', // choice | join | genres
+  onboardStep: null,     // null (auto: switcher if they have crews, else choice) | choice | join | genres
+  myCrews: {},           // { code: {label, joinedAt} } - crews this Google account belongs to
+  myCrewsLoaded: false,
+  renamingCrewCode: null,
   joinCode: '',
   joinError: '',
   crewUsers: {},         // live from firebase: { userId: {name,photo,picks,live,updated} }
@@ -493,6 +498,7 @@ function saveIdentity(){
 }
 function clearIdentity(){
   detachListeners();
+  if(state.myCrews) delete state.myCrews[state.code];
   state.code = null;
   state.crewUsers = {};
   state.groupOwner = null;
@@ -541,11 +547,36 @@ function ensureProfile(){
     if(snap.exists() && snap.val().name){
       state.name = snap.val().name;
     } else {
-      db.ref(`profiles/${state.userId}`).set({name: state.name, created: firebase.database.ServerValue.TIMESTAMP})
+      db.ref(`profiles/${state.userId}`).update({name: state.name, created: firebase.database.ServerValue.TIMESTAMP})
         .catch(err=>console.error('Failed to create profile:', err));
     }
     render();
   }).catch(err=>console.error('Failed to load profile:', err));
+}
+function loadMyCrews(){
+  if(!FB_READY || !state.userId) return;
+  db.ref(`profiles/${state.userId}/crews`).once('value').then(snap => {
+    state.myCrews = snap.val() || {};
+    state.myCrewsLoaded = true;
+    render();
+  }).catch(err => {
+    console.error('Failed to load your crews:', err);
+    state.myCrewsLoaded = true;
+    render();
+  });
+}
+function switchToCrew(code){
+  if(!code || code === state.code) return;
+  state.code = code;
+  state.crewUsers = {};
+  state.groupOwner = null;
+  state.onboardStep = null;
+  state.renamingCrewCode = null;
+  saveIdentity();
+  attachListener();
+  db.ref(`crews/${code}/users/${state.userId}`).update({name: state.name, updated: firebase.database.ServerValue.TIMESTAMP})
+    .catch(err => console.error('Failed to refresh name on switch:', err));
+  render();
 }
 let groupRef = null;
 function attachGroupListener(){
@@ -658,6 +689,8 @@ function leaveCrewRemote(){
   if(!FB_READY) return;
   db.ref(`crews/${state.code}/users/${state.userId}`).remove()
     .catch(err => console.error('Failed to leave crew:', err));
+  db.ref(`profiles/${state.userId}/crews/${state.code}`).remove()
+    .catch(err => console.error('Failed to remove crew from index:', err));
 }
 
 /* ---------------------------------------------------------------------
@@ -718,6 +751,7 @@ function render(){
   if(!state.authReady){ root.innerHTML = renderLoadingScreen(); return; }
   if(!state.userId){ root.innerHTML = renderSignIn(); return; }
   if(!state.code){
+    if(!state.myCrewsLoaded){ root.innerHTML = renderLoadingScreen(); return; }
     root.innerHTML = renderOnboarding();
     return;
   }
@@ -796,19 +830,25 @@ function renderSetupNotice(){
    Onboarding
    --------------------------------------------------------------------- */
 function renderOnboarding(){
-  if(state.onboardStep === 'join'){
-    return `
-    <div class="onboard">
-      <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
-      <div class="onboard-card">
-        <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="4" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
-        <div class="err-text">${escapeHtml(state.joinError)}</div>
-        <button class="btn primary block" id="joinBtn" ${state.joinCode.length===4 ? '' : 'disabled'}>Join crew</button>
-        <button class="link-btn" data-action="back-to-choice">&larr; back</button>
-      </div>
-    </div>`;
-  }
-  // choice (default)
+  if(state.onboardStep === 'join') return renderJoinScreen();
+  if(state.onboardStep === 'choice') return renderChoiceScreen();
+  if(Object.keys(state.myCrews||{}).length) return renderSwitchScreen();
+  return renderChoiceScreen();
+}
+function renderJoinScreen(){
+  return `
+  <div class="onboard">
+    <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
+    <div class="onboard-card">
+      <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="4" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
+      <div class="err-text">${escapeHtml(state.joinError)}</div>
+      <button class="btn primary block" id="joinBtn" ${state.joinCode.length===4 ? '' : 'disabled'}>Join crew</button>
+      <button class="link-btn" data-action="back-to-choice">&larr; back</button>
+    </div>
+  </div>`;
+}
+function renderChoiceScreen(){
+  const hasCrews = Object.keys(state.myCrews||{}).length > 0;
   return `
   <div class="onboard">
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
@@ -822,6 +862,46 @@ function renderOnboarding(){
         <strong>Join a crew</strong>
         <span>Got a code from a mate?</span>
       </button>
+      ${hasCrews ? '<button class="link-btn" data-action="back-to-switch">&larr; back to my crews</button>' : ''}
+      <button class="link-btn" data-action="sign-out">Not you? Sign out</button>
+    </div>
+  </div>`;
+}
+function renderSwitchScreen(){
+  const crews = state.myCrews || {};
+  const codes = Object.keys(crews).sort((a,b) => (crews[b].joinedAt||0) - (crews[a].joinedAt||0));
+  const rows = codes.map(code => {
+    const entry = crews[code] || {};
+    const label = entry.label || code;
+    if(state.renamingCrewCode === code){
+      return `
+      <div class="member-row" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <input id="renameCrewInput" value="${escapeHtml(label)}" maxlength="30" placeholder="Name this crew" autofocus>
+        <div style="display:flex;gap:8px;">
+          <button class="btn primary" style="flex:1;" data-action="save-crew-label" data-code="${code}">Save</button>
+          <button class="btn ghost" style="flex:1;" data-action="cancel-rename-crew">Cancel</button>
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="member-row">
+      <div style="flex:1;min-width:0;cursor:pointer;" data-action="switch-to-crew" data-code="${code}">
+        <div class="member-name">${escapeHtml(label)}</div>
+        <div class="member-counts">Code ${escapeHtml(code)}</div>
+      </div>
+      <button class="link-btn" style="padding:4px 2px;" data-action="rename-crew-label" data-code="${code}">Rename</button>
+    </div>`;
+  }).join('');
+  return `
+  <div class="onboard">
+    <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
+    <div class="onboard-card">
+      <p style="color:var(--text-dim);font-size:14px;margin:0 0 4px;">Hey ${escapeHtml(state.name||'there')}!</p>
+      <div class="list-card">${rows}</div>
+      <button class="big-btn" data-action="show-choice">
+        <strong>Join another crew</strong>
+        <span>Start a new one or use a code</span>
+      </button>
       <button class="link-btn" data-action="sign-out">Not you? Sign out</button>
     </div>
   </div>`;
@@ -834,6 +914,10 @@ function doStartCrew(){
     .catch(err => console.error('Failed to create crew:', err));
   db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
     .catch(err => console.error('Failed to create user:', err));
+  db.ref(`profiles/${state.userId}/crews/${code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP})
+    .catch(err => console.error('Failed to index crew:', err));
+  state.myCrews = state.myCrews || {};
+  state.myCrews[code] = Object.assign({}, state.myCrews[code], {joinedAt: Date.now()});
   saveIdentity();
   attachListener();
   state.onboardStep = 'genres';
@@ -852,6 +936,10 @@ function doJoinCrew(){
     saveIdentity();
     const userRef = db.ref(`crews/${code}/users/${state.userId}`);
     userRef.once('value').then(userSnap => {
+      db.ref(`profiles/${state.userId}/crews/${code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP})
+        .catch(err => console.error('Failed to index crew:', err));
+      state.myCrews = state.myCrews || {};
+      state.myCrews[code] = Object.assign({}, state.myCrews[code], {joinedAt: Date.now()});
       if(userSnap.exists()){
         // returning member (e.g. signed in on a new device) - don't clobber existing picks
         userRef.update({name: state.name, updated: firebase.database.ServerValue.TIMESTAMP})
@@ -1594,6 +1682,8 @@ function renderCrewSheet(){
     <div style="height:8px"></div>
     <button class="btn block" data-action="open-bingo">Festival Bingo</button>
     <div style="height:8px"></div>
+    <button class="btn block" data-action="switch-group">Switch group</button>
+    <div style="height:8px"></div>
     <button class="btn block danger" data-action="leave-crew">Leave crew</button>
     <div style="height:8px"></div>
     <button class="btn block ghost" data-action="sign-out">Sign out</button>
@@ -1663,6 +1753,38 @@ document.addEventListener('click', function(e){
       state.onboardStep = 'join'; render(); return;
     case 'back-to-choice':
       state.onboardStep = 'choice'; render(); return;
+    case 'show-choice':
+      state.onboardStep = 'choice'; render(); return;
+    case 'back-to-switch':
+      state.onboardStep = null; state.renamingCrewCode = null; render(); return;
+    case 'switch-to-crew':
+      switchToCrew(btn.dataset.code); return;
+    case 'rename-crew-label':
+      state.renamingCrewCode = btn.dataset.code; render(); return;
+    case 'cancel-rename-crew':
+      state.renamingCrewCode = null; render(); return;
+    case 'save-crew-label': {
+      const code = btn.dataset.code;
+      const input = document.getElementById('renameCrewInput');
+      const label = (input ? input.value.trim() : '') || code;
+      state.myCrews = state.myCrews || {};
+      state.myCrews[code] = Object.assign({}, state.myCrews[code], {label});
+      state.renamingCrewCode = null;
+      render();
+      db.ref(`profiles/${state.userId}/crews/${code}/label`).set(label)
+        .catch(err => console.error('Failed to save crew label:', err));
+      return;
+    }
+    case 'switch-group':
+      detachListeners();
+      state.code = null;
+      state.crewUsers = {};
+      state.groupOwner = null;
+      state.onboardStep = null;
+      state.sheet = null;
+      saveIdentity();
+      render();
+      return;
     case 'toggle-genre': {
       const g = btn.dataset.genre;
       if(state.genreSelections.has(g)) state.genreSelections.delete(g); else state.genreSelections.add(g);
@@ -1946,12 +2068,21 @@ if(FB_READY){
       state.userId = user.uid;
       if(!state.name) state.name = user.displayName || 'Friend';
       ensureProfile();
-      if(state.code) attachListener();
+      state.myCrewsLoaded = false;
+      loadMyCrews();
+      if(state.code){
+        attachListener();
+        db.ref(`profiles/${user.uid}/crews/${state.code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP})
+          .catch(err => console.error('Failed to backfill crew index:', err));
+      }
     } else {
       detachListeners();
       state.userId = null;
       state.code = null;
       state.crewUsers = {};
+      state.myCrews = {};
+      state.myCrewsLoaded = false;
+      state.onboardStep = null;
       saveIdentity();
     }
     render();
