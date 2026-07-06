@@ -453,6 +453,7 @@ const state = {
   userId: null,
   name: null,
   code: null,
+  crewEntered: false,    // true once the user has actively landed in a specific crew this session
   onboardStep: null,     // null (auto: switcher if they have crews, else choice) | choice | join | genres
   myCrews: {},           // { code: {label, joinedAt} } - crews this Google account belongs to
   myCrewsLoaded: false,
@@ -502,6 +503,7 @@ function clearIdentity(){
   state.code = null;
   state.crewUsers = {};
   state.groupOwner = null;
+  state.crewEntered = false;
   saveIdentity();
 }
 
@@ -558,7 +560,13 @@ function loadMyCrews(){
   db.ref(`profiles/${state.userId}/crews`).once('value').then(snap => {
     state.myCrews = snap.val() || {};
     state.myCrewsLoaded = true;
-    render();
+    const codes = Object.keys(state.myCrews);
+    if(!state.crewEntered && codes.length === 1){
+      // only one crew on this account - no real choice to make, so skip the switcher
+      switchToCrew(codes[0]);
+    } else {
+      render();
+    }
   }).catch(err => {
     console.error('Failed to load your crews:', err);
     state.myCrewsLoaded = true;
@@ -566,10 +574,12 @@ function loadMyCrews(){
   });
 }
 function switchToCrew(code){
-  if(!code || code === state.code) return;
+  if(!code) return;
+  if(state.crewEntered && code === state.code) return;
   state.code = code;
   state.crewUsers = {};
   state.groupOwner = null;
+  state.crewEntered = true;
   state.onboardStep = null;
   state.renamingCrewCode = null;
   saveIdentity();
@@ -750,7 +760,7 @@ function render(){
   if(!FB_READY){ root.innerHTML = renderSetupNotice(); return; }
   if(!state.authReady){ root.innerHTML = renderLoadingScreen(); return; }
   if(!state.userId){ root.innerHTML = renderSignIn(); return; }
-  if(!state.code){
+  if(!state.crewEntered){
     if(!state.myCrewsLoaded){ root.innerHTML = renderLoadingScreen(); return; }
     root.innerHTML = renderOnboarding();
     return;
@@ -910,6 +920,7 @@ function renderSwitchScreen(){
 function doStartCrew(){
   const code = genCode();
   state.code = code;
+  state.crewEntered = true;
   db.ref(`crews/${code}/group`).set({created: firebase.database.ServerValue.TIMESTAMP, by: state.userId})
     .catch(err => console.error('Failed to create crew:', err));
   db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
@@ -932,6 +943,7 @@ function doJoinCrew(){
       return;
     }
     state.code = code;
+    state.crewEntered = true;
     state.joinError = '';
     saveIdentity();
     const userRef = db.ref(`crews/${code}/users/${state.userId}`);
@@ -1780,6 +1792,7 @@ document.addEventListener('click', function(e){
       state.code = null;
       state.crewUsers = {};
       state.groupOwner = null;
+      state.crewEntered = false;
       state.onboardStep = null;
       state.sheet = null;
       saveIdentity();
@@ -2069,17 +2082,18 @@ if(FB_READY){
       if(!state.name) state.name = user.displayName || 'Friend';
       ensureProfile();
       state.myCrewsLoaded = false;
-      loadMyCrews();
-      if(state.code){
-        attachListener();
-        db.ref(`profiles/${user.uid}/crews/${state.code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP})
-          .catch(err => console.error('Failed to backfill crew index:', err));
-      }
+      // if this device remembers a crew code from before this account's crew list was
+      // indexed, backfill it into the index first so loadMyCrews() can see it below
+      const backfill = state.code
+        ? db.ref(`profiles/${user.uid}/crews/${state.code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP}).catch(err => console.error('Failed to backfill crew index:', err))
+        : Promise.resolve();
+      backfill.then(() => loadMyCrews());
     } else {
       detachListeners();
       state.userId = null;
       state.code = null;
       state.crewUsers = {};
+      state.crewEntered = false;
       state.myCrews = {};
       state.myCrewsLoaded = false;
       state.onboardStep = null;
