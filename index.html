@@ -436,6 +436,7 @@ function checkUpcomingNotifications(){
    --------------------------------------------------------------------- */
 const state = {
   authReady: false,
+  authError: null,
   userId: null,
   name: null,
   code: null,
@@ -510,8 +511,15 @@ function detachListeners(){
 }
 function signInWithGoogle(){
   if(!FB_READY) return;
+  state.authError = null;
   const provider = new firebase.auth.GoogleAuthProvider();
-  firebase.auth().signInWithRedirect(provider).catch(err => console.error('Sign-in failed:', err));
+  firebase.auth().signInWithPopup(provider).catch(err => {
+    console.error('Sign-in failed:', err);
+    if(err && err.code !== 'auth/cancelled-popup-request' && err.code !== 'auth/popup-closed-by-user'){
+      state.authError = err.message || 'Sign-in failed. Please try again.';
+    }
+    render();
+  });
 }
 function signOutUser(){
   if(!FB_READY) return;
@@ -717,6 +725,7 @@ function renderSignIn(){
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     <div class="onboard-card">
       <button class="btn primary block" data-action="sign-in-google" style="display:flex;align-items:center;justify-content:center;gap:10px;">${iconGoogle()}Sign in with Google</button>
+      ${state.authError ? `<div class="err-text">${escapeHtml(state.authError)}</div>` : ''}
     </div>
   </div>`;
 }
@@ -1875,7 +1884,6 @@ document.addEventListener('keydown', function(e){
    --------------------------------------------------------------------- */
 loadIdentity();
 if(FB_READY){
-  firebase.auth().getRedirectResult().catch(err => console.error('Redirect sign-in error:', err));
   firebase.auth().onAuthStateChanged(user => {
     state.authReady = true;
     if(user){
