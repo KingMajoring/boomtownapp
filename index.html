@@ -77,6 +77,9 @@ h1,h2,h3{margin:0;font-family:var(--font-head);font-weight:700;}
 .err-text{color:var(--red);font-size:13px;min-height:16px;}
 .code-input{font-family:var(--font-head);letter-spacing:8px;text-align:center;font-size:26px;text-transform:uppercase;}
 .link-btn{background:none;border:none;color:var(--text-dim);font-size:14px;text-decoration:underline;padding:8px;}
+.install-help{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:left;display:flex;flex-direction:column;gap:8px;}
+.install-step{font-size:13px;color:var(--text-dim);line-height:1.4;}
+.install-step b{color:var(--text);}
 
 /* ---------- Setup notice ---------- */
 .setup-notice{min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:28px;}
@@ -268,6 +271,13 @@ const FIREBASE_CONFIG = {
 };
 const FB_READY = !!(FIREBASE_CONFIG.apiKey && typeof FIREBASE_CONFIG.apiKey === 'string' && !FIREBASE_CONFIG.apiKey.startsWith('PASTE_'));
 
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  render();
+});
+
 let db = null;
 if (FB_READY) {
   firebase.initializeApp(FIREBASE_CONFIG);
@@ -437,6 +447,7 @@ function checkUpcomingNotifications(){
 const state = {
   authReady: false,
   authError: null,
+  showInstallHelp: false,
   userId: null,
   name: null,
   code: null,
@@ -726,7 +737,44 @@ function renderSignIn(){
     <div class="onboard-card">
       <button class="btn primary block" data-action="sign-in-google" style="display:flex;align-items:center;justify-content:center;gap:10px;">${iconGoogle()}Sign in with Google</button>
       ${state.authError ? `<div class="err-text">${escapeHtml(state.authError)}</div>` : ''}
+      ${renderInstallHelper()}
     </div>
+  </div>`;
+}
+function isStandaloneApp(){
+  return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true;
+}
+function isIOSDevice(){
+  return /iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+function renderInstallHelper(){
+  if(isStandaloneApp()) return '';
+  return `
+    <button class="link-btn" data-action="toggle-install-help">${state.showInstallHelp ? 'Hide' : 'Get the app on your home screen'}</button>
+    ${state.showInstallHelp ? renderInstallSteps() : ''}
+  `;
+}
+function renderInstallSteps(){
+  if(isIOSDevice()){
+    return `
+    <div class="install-help">
+      <div class="install-step"><b>1.</b> Tap the Share icon in Safari's toolbar</div>
+      <div class="install-step"><b>2.</b> Scroll down and tap <b>Add to Home Screen</b></div>
+      <div class="install-step"><b>3.</b> Tap <b>Add</b> &mdash; you'll get an app icon, no App Store needed</div>
+    </div>`;
+  }
+  if(deferredInstallPrompt){
+    return `
+    <div class="install-help">
+      <div class="install-step">Install Boomtown Crew as an app on your phone &mdash; works offline and feels like a native app.</div>
+      <button class="btn block" data-action="install-now">Install app</button>
+    </div>`;
+  }
+  return `
+  <div class="install-help">
+    <div class="install-step"><b>1.</b> Open the &#8942; menu in your browser</div>
+    <div class="install-step"><b>2.</b> Tap <b>Install app</b> (or <b>Add to Home screen</b>)</div>
+    <div class="install-step"><b>3.</b> Confirm &mdash; you'll get an app icon, no app store needed</div>
   </div>`;
 }
 function iconGoogle(){
@@ -1726,6 +1774,14 @@ document.addEventListener('click', function(e){
       state.sheet = {type:'photo'}; render(); return;
     case 'sign-in-google':
       signInWithGoogle(); return;
+    case 'toggle-install-help':
+      state.showInstallHelp = !state.showInstallHelp; render(); return;
+    case 'install-now':
+      if(deferredInstallPrompt){
+        deferredInstallPrompt.prompt();
+        deferredInstallPrompt.userChoice.finally(() => { deferredInstallPrompt = null; render(); });
+      }
+      return;
     case 'sign-out':
       if(confirm('Sign out?')){
         state.sheet = null;
