@@ -559,19 +559,48 @@ function loadMyCrews(){
   if(!FB_READY || !state.userId) return;
   db.ref(`profiles/${state.userId}/crews`).once('value').then(snap => {
     state.myCrews = snap.val() || {};
-    state.myCrewsLoaded = true;
-    const codes = Object.keys(state.myCrews);
-    if(!state.crewEntered && codes.length === 1){
-      // only one crew on this account - no real choice to make, so skip the switcher
-      switchToCrew(codes[0]);
+    const finish = () => {
+      state.myCrewsLoaded = true;
+      const codes = Object.keys(state.myCrews);
+      if(!state.crewEntered && codes.length === 1){
+        // only one crew on this account - no real choice to make, so skip the switcher
+        switchToCrew(codes[0]);
+      } else {
+        render();
+      }
+    };
+    if(Object.keys(state.myCrews).length === 0){
+      // index empty - could be a genuinely new account, or a crew joined before this
+      // index existed. Do a one-off scan of actual crew memberships to self-heal the
+      // index for anyone in the latter case; harmless (and cheap) if there's nothing to find.
+      recoverUnindexedCrews().then(finish);
     } else {
-      render();
+      finish();
     }
   }).catch(err => {
     console.error('Failed to load your crews:', err);
     state.myCrewsLoaded = true;
     render();
   });
+}
+function recoverUnindexedCrews(){
+  return db.ref('crews').once('value').then(snap => {
+    const all = snap.val() || {};
+    const found = {};
+    Object.keys(all).forEach(code => {
+      const crew = all[code];
+      if(crew && crew.users && crew.users[state.userId]){
+        found[code] = {joinedAt: crew.users[state.userId].updated || Date.now()};
+      }
+    });
+    if(Object.keys(found).length){
+      state.myCrews = found;
+      const updates = {};
+      Object.keys(found).forEach(code => { updates[code] = {joinedAt: firebase.database.ServerValue.TIMESTAMP}; });
+      db.ref(`profiles/${state.userId}/crews`).update(updates)
+        .catch(err => console.error('Failed to backfill recovered crews:', err));
+    }
+  }).catch(err => console.error('Failed to recover unindexed crews:', err));
 }
 function switchToCrew(code){
   if(!code) return;
