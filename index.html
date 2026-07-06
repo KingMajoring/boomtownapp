@@ -1727,7 +1727,7 @@ function renderLiveTab(){
     <div class="field-group">
       <select id="liveStageSelect">
         <option value="">Choose a stage&hellip;</option>
-        ${STAGES.map((s,i)=>`<option value="${i}" ${stagePick===i?'selected':''}>${escapeHtml(s)}</option>`).join('')}
+        ${STAGES.map((s,i)=>({s,i})).sort((a,b)=>a.s.localeCompare(b.s)).map(({s,i})=>`<option value="${i}" ${stagePick===i?'selected':''}>${escapeHtml(s)}</option>`).join('')}
       </select>
     </div>
     ${stagePick!=null ? `
