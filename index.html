@@ -248,6 +248,7 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script>
 /* =====================================================================
    FIREBASE CONFIG
@@ -361,9 +362,6 @@ function genCode(){
   for(let i=0;i<4;i++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
   return s;
 }
-function genUserId(){
-  return 'u' + Math.random().toString(36).slice(2,10) + Date.now().toString(36);
-}
 function timeAgo(ts){
   if(!ts) return '';
   const diff = Math.max(0, Date.now() - ts);
@@ -437,11 +435,11 @@ function checkUpcomingNotifications(){
    State
    --------------------------------------------------------------------- */
 const state = {
+  authReady: false,
   userId: null,
   name: null,
   code: null,
-  onboardStep: 'name',   // name | choice | join
-  draftName: '',
+  onboardStep: 'choice', // choice | join | genres
   joinCode: '',
   joinError: '',
   crewUsers: {},         // live from firebase: { userId: {name,photo,picks,live,updated} }
@@ -465,14 +463,8 @@ const state = {
 
 function loadIdentity(){
   try{
-    const raw = localStorage.getItem('boomtown_identity');
-    if(!raw) return;
-    const obj = JSON.parse(raw);
-    if(obj && obj.userId && obj.code){
-      state.userId = obj.userId;
-      state.name = obj.name;
-      state.code = obj.code;
-    }
+    const raw = localStorage.getItem('boomtown_code');
+    if(raw) state.code = raw;
   }catch(e){}
   try{
     if(state.code){
@@ -482,12 +474,17 @@ function loadIdentity(){
   }catch(e){}
 }
 function saveIdentity(){
-  localStorage.setItem('boomtown_identity', JSON.stringify({userId:state.userId, name:state.name, code:state.code}));
+  try{
+    if(state.code) localStorage.setItem('boomtown_code', state.code);
+    else localStorage.removeItem('boomtown_code');
+  }catch(e){}
 }
 function clearIdentity(){
-  localStorage.removeItem('boomtown_identity');
-  state.userId = null; state.name=null; state.code=null; state.crewUsers={};
-  state.onboardStep='name'; state.draftName='';
+  detachListeners();
+  state.code = null;
+  state.crewUsers = {};
+  state.groupOwner = null;
+  saveIdentity();
 }
 
 /* ---------------------------------------------------------------------
@@ -505,6 +502,31 @@ function attachListener(){
   });
   attachBingoListener();
   attachGroupListener();
+}
+function detachListeners(){
+  if(usersRef){ usersRef.off(); usersRef = null; }
+  if(bingoRef){ bingoRef.off(); bingoRef = null; }
+  if(groupRef){ groupRef.off(); groupRef = null; }
+}
+function signInWithGoogle(){
+  if(!FB_READY) return;
+  const provider = new firebase.auth.GoogleAuthProvider();
+  firebase.auth().signInWithRedirect(provider).catch(err => console.error('Sign-in failed:', err));
+}
+function signOutUser(){
+  if(!FB_READY) return;
+  firebase.auth().signOut().catch(err => console.error('Sign-out failed:', err));
+}
+function ensureProfile(){
+  db.ref(`profiles/${state.userId}`).once('value').then(snap=>{
+    if(snap.exists() && snap.val().name){
+      state.name = snap.val().name;
+    } else {
+      db.ref(`profiles/${state.userId}`).set({name: state.name, created: firebase.database.ServerValue.TIMESTAMP})
+        .catch(err=>console.error('Failed to create profile:', err));
+    }
+    render();
+  }).catch(err=>console.error('Failed to load profile:', err));
 }
 let groupRef = null;
 function attachGroupListener(){
@@ -601,7 +623,8 @@ function setMemberName(uid, newName){
     .catch(err=>console.error('Failed to update name:', err));
   if(uid === state.userId){
     state.name = newName;
-    saveIdentity();
+    db.ref(`profiles/${state.userId}`).update({name: newName})
+      .catch(err=>console.error('Failed to update profile name:', err));
   }
 }
 function removeMember(uid){
@@ -673,7 +696,9 @@ function clashActIdxSet(){
 function render(){
   const root = document.getElementById('app');
   if(!FB_READY){ root.innerHTML = renderSetupNotice(); return; }
-  if(!state.userId || !state.code){
+  if(!state.authReady){ root.innerHTML = renderLoadingScreen(); return; }
+  if(!state.userId){ root.innerHTML = renderSignIn(); return; }
+  if(!state.code){
     root.innerHTML = renderOnboarding();
     return;
   }
@@ -682,6 +707,21 @@ function render(){
     return;
   }
   root.innerHTML = renderShell();
+}
+function renderLoadingScreen(){
+  return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div></div>`;
+}
+function renderSignIn(){
+  return `
+  <div class="onboard">
+    <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
+    <div class="onboard-card">
+      <button class="btn primary block" data-action="sign-in-google" style="display:flex;align-items:center;justify-content:center;gap:10px;">${iconGoogle()}Sign in with Google</button>
+    </div>
+  </div>`;
+}
+function iconGoogle(){
+  return `<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 01-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 009 18z"/><path fill="#FBBC05" d="M3.97 10.72A5.4 5.4 0 013.68 9c0-.6.1-1.18.29-1.72V4.95H.96A9 9 0 000 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 00.96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg>`;
 }
 
 function renderSetupNotice(){
@@ -699,42 +739,33 @@ function renderSetupNotice(){
    Onboarding
    --------------------------------------------------------------------- */
 function renderOnboarding(){
-  if(state.onboardStep === 'name'){
+  if(state.onboardStep === 'join'){
     return `
     <div class="onboard">
       <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
       <div class="onboard-card">
-        <input id="nameInput" placeholder="Your name" value="${escapeHtml(state.draftName)}" maxlength="24" autocomplete="off">
-        <button class="btn primary block" id="nameContinueBtn" ${state.draftName.trim() ? '' : 'disabled'}>Continue</button>
+        <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="4" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
+        <div class="err-text">${escapeHtml(state.joinError)}</div>
+        <button class="btn primary block" id="joinBtn" ${state.joinCode.length===4 ? '' : 'disabled'}>Join crew</button>
+        <button class="link-btn" data-action="back-to-choice">&larr; back</button>
       </div>
     </div>`;
   }
-  if(state.onboardStep === 'choice'){
-    return `
-    <div class="onboard">
-      <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
-      <div class="onboard-card">
-        <button class="big-btn primary" data-action="start-crew">
-          <strong>Start a new crew</strong>
-          <span>Get a 4-letter code to share</span>
-        </button>
-        <button class="big-btn" data-action="show-join">
-          <strong>Join a crew</strong>
-          <span>Got a code from a mate?</span>
-        </button>
-        <button class="link-btn" data-action="back-to-name">&larr; back</button>
-      </div>
-    </div>`;
-  }
-  // join
+  // choice (default)
   return `
   <div class="onboard">
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     <div class="onboard-card">
-      <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="4" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
-      <div class="err-text">${escapeHtml(state.joinError)}</div>
-      <button class="btn primary block" id="joinBtn" ${state.joinCode.length===4 ? '' : 'disabled'}>Join crew</button>
-      <button class="link-btn" data-action="back-to-choice">&larr; back</button>
+      <p style="color:var(--text-dim);font-size:14px;margin:0 0 4px;">Hey ${escapeHtml(state.name||'there')}!</p>
+      <button class="big-btn primary" data-action="start-crew">
+        <strong>Start a new crew</strong>
+        <span>Get a 4-letter code to share</span>
+      </button>
+      <button class="big-btn" data-action="show-join">
+        <strong>Join a crew</strong>
+        <span>Got a code from a mate?</span>
+      </button>
+      <button class="link-btn" data-action="sign-out">Not you? Sign out</button>
     </div>
   </div>`;
 }
@@ -742,7 +773,6 @@ function renderOnboarding(){
 function doStartCrew(){
   const code = genCode();
   state.code = code;
-  state.userId = genUserId();
   db.ref(`crews/${code}/group`).set({created: firebase.database.ServerValue.TIMESTAMP, by: state.userId})
     .catch(err => console.error('Failed to create crew:', err));
   db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
@@ -760,15 +790,24 @@ function doJoinCrew(){
       render();
       return;
     }
-    state.userId = genUserId();
     state.code = code;
     state.joinError = '';
-    db.ref(`crews/${code}/users/${state.userId}`).set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
-      .catch(err => console.error('Failed to join crew:', err));
     saveIdentity();
-    attachListener();
-    state.onboardStep = 'genres';
-    render();
+    const userRef = db.ref(`crews/${code}/users/${state.userId}`);
+    userRef.once('value').then(userSnap => {
+      if(userSnap.exists()){
+        // returning member (e.g. signed in on a new device) - don't clobber existing picks
+        userRef.update({name: state.name, updated: firebase.database.ServerValue.TIMESTAMP})
+          .catch(err => console.error('Failed to update returning member:', err));
+        state.onboardStep = null;
+      } else {
+        userRef.set({name: state.name, picks:{}, updated: firebase.database.ServerValue.TIMESTAMP})
+          .catch(err => console.error('Failed to join crew:', err));
+        state.onboardStep = 'genres';
+      }
+      attachListener();
+      render();
+    }).catch(err => console.error('Failed to check membership:', err));
   }).catch((err)=>{
     console.error('Failed to join crew:', err);
     state.joinError = 'Something went wrong — try again.';
@@ -1499,6 +1538,8 @@ function renderCrewSheet(){
     <button class="btn block" data-action="open-bingo">Festival Bingo</button>
     <div style="height:8px"></div>
     <button class="btn block danger" data-action="leave-crew">Leave crew</button>
+    <div style="height:8px"></div>
+    <button class="btn block ghost" data-action="sign-out">Sign out</button>
   </div>`;
 }
 function renderPhotoSheet(){
@@ -1577,8 +1618,6 @@ document.addEventListener('click', function(e){
     case 'skip-genre-quiz':
       state.onboardStep = null;
       render(); return;
-    case 'back-to-name':
-      state.onboardStep = 'name'; render(); return;
     case 'set-tab':
       state.tab = btn.dataset.tab; state.sheet=null; render(); return;
     case 'set-day':
@@ -1676,6 +1715,14 @@ document.addEventListener('click', function(e){
       state.sheet = {type:'crew'}; render(); return;
     case 'open-photo':
       state.sheet = {type:'photo'}; render(); return;
+    case 'sign-in-google':
+      signInWithGoogle(); return;
+    case 'sign-out':
+      if(confirm('Sign out?')){
+        state.sheet = null;
+        signOutUser();
+      }
+      return;
     case 'copy-code': {
       if(navigator.clipboard) navigator.clipboard.writeText(state.code).catch(()=>{});
       btn.textContent = 'Copied!';
@@ -1726,12 +1773,6 @@ document.addEventListener('click', function(e){
 });
 
 document.addEventListener('input', function(e){
-  if(e.target.id === 'nameInput'){
-    state.draftName = e.target.value;
-    const btn = document.getElementById('nameContinueBtn');
-    if(btn) btn.disabled = !state.draftName.trim();
-    return;
-  }
   if(e.target.id === 'joinCodeInput'){
     state.joinCode = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,4);
     e.target.value = state.joinCode;
@@ -1823,20 +1864,9 @@ document.addEventListener('click', function(e){
 
 document.addEventListener('keydown', function(e){
   if(e.key === 'Enter'){
-    if(e.target.id === 'nameInput' && state.draftName.trim()){
-      state.name = state.draftName.trim();
-      state.onboardStep = 'choice';
-      render();
-    } else if(e.target.id === 'joinCodeInput' && state.joinCode.length===4){
+    if(e.target.id === 'joinCodeInput' && state.joinCode.length===4){
       doJoinCrew();
     }
-  }
-});
-
-document.addEventListener('click', function(e){
-  if(e.target.id === 'nameContinueBtn'){
-    state.name = state.draftName.trim();
-    if(state.name){ state.onboardStep = 'choice'; render(); }
   }
 });
 
@@ -1844,7 +1874,27 @@ document.addEventListener('click', function(e){
    Boot
    --------------------------------------------------------------------- */
 loadIdentity();
-if(state.userId && state.code) attachListener();
+if(FB_READY){
+  firebase.auth().getRedirectResult().catch(err => console.error('Redirect sign-in error:', err));
+  firebase.auth().onAuthStateChanged(user => {
+    state.authReady = true;
+    if(user){
+      state.userId = user.uid;
+      if(!state.name) state.name = user.displayName || 'Friend';
+      ensureProfile();
+      if(state.code) attachListener();
+    } else {
+      detachListeners();
+      state.userId = null;
+      state.code = null;
+      state.crewUsers = {};
+      saveIdentity();
+    }
+    render();
+  });
+} else {
+  state.authReady = true;
+}
 render();
 setInterval(()=>{
   checkUpcomingNotifications();
