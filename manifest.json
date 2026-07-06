@@ -1,0 +1,14 @@
+{
+  "name": "Boomtown Crew 2026",
+  "short_name": "Boomtown",
+  "description": "Festival companion for coordinating your crew at Boomtown 2026",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#151011",
+  "theme_color": "#151011",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

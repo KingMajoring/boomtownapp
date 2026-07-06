@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#151011">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Boomtown Crew 2026</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -45,7 +49,9 @@ body{
 }
 button,input,select{font-family:inherit;color:inherit;}
 button{cursor:pointer;-webkit-user-select:none;user-select:none;}
-input,select{background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:11px 12px;font-size:15px;width:100%;}
+input,select,textarea{background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:11px 12px;font-size:15px;width:100%;}
+textarea{resize:vertical;font-family:inherit;}
+.note-text{display:block;color:var(--text-dim);font-size:12.5px;font-style:italic;margin-top:6px;}
 input::placeholder{color:var(--text-dim2);}
 a{color:var(--gold);}
 h1,h2,h3{margin:0;font-family:var(--font-head);font-weight:700;}
@@ -279,6 +285,31 @@ const DAY_LABELS = ['Wed 12','Thu 13','Fri 14','Sat 15','Sun 16'];
 const DAY_FULL = ['Wednesday 12 August','Thursday 13 August','Friday 14 August','Saturday 15 August','Sunday 16 August'];
 const FEST_DATES = ['2026-08-12','2026-08-13','2026-08-14','2026-08-15','2026-08-16'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const GENRE_KEYWORDS = {
+  'Jungle & DnB': ['jungle','dnb','d&b','drum and bass','rollers','breakbeat'],
+  'Dub & Reggae': ['dub','reggae','ska','roots','soundsystem','sound system'],
+  'Bass & Dubstep': ['dubstep','bassline','grime','140 set','bass injector'],
+  'Techno & Acid': ['techno','acid','gabber','hard trance'],
+  'House & Disco': ['house','disco','garage','ukg'],
+  'Hip-Hop & Grime': ['hip hop','hip-hop','rap showcase'],
+  'Folk & Trad': ['folk','trad','irish','ceilidh','balkan'],
+  'Punk & Rock': ['punk','rock','ska punk'],
+  'Comedy & Cabaret': ['comedy','cabaret','bingo','circus','karaoke'],
+};
+const BINGO_ITEMS = [
+  'See someone in a banana costume',
+  "Catch a surprise B2B you didn't know was happening",
+  'Dance in the rain',
+  'Make a new friend in a silent disco',
+  'Get lost trying to find a stage',
+  "Spot a fancy dress theme you can't explain",
+  'Sing along so loud you lose your voice',
+  'Find the best food van on site',
+  'Watch the sunrise at a stage',
+  "End up somewhere you didn't plan to be",
+  'Take a nap in a random field',
+  'Meet someone from your hometown',
+];
 
 /* ---------------------------------------------------------------------
    Helpers
@@ -377,6 +408,30 @@ function getNowAndNextPick(){
   });
   return {current, next};
 }
+function loadNotifiedActs(){
+  try{
+    const raw = localStorage.getItem('boomtown_notified_acts');
+    if(raw) return new Set(JSON.parse(raw));
+  }catch(e){}
+  return new Set();
+}
+function saveNotifiedActs(){
+  try{ localStorage.setItem('boomtown_notified_acts', JSON.stringify([...state.notifiedActs])); }catch(e){}
+}
+function checkUpcomingNotifications(){
+  if(typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const now = new Date();
+  myPicksList().filter(p=>p.tag==='must').forEach(p=>{
+    if(state.notifiedActs.has(p.actIdx)) return;
+    const act = ACTS[p.actIdx];
+    const diffMin = (actStart(act)-now)/60000;
+    if(diffMin > 0 && diffMin <= 15){
+      new Notification('Starting soon: '+act[4], {body: `${STAGES[act[0]]} · ${act[2]}`, icon: './icons/icon-192.png'});
+      state.notifiedActs.add(p.actIdx);
+      saveNotifiedActs();
+    }
+  });
+}
 
 /* ---------------------------------------------------------------------
    State
@@ -397,10 +452,14 @@ const state = {
   openStages: new Set(),
   planDay: 'all',        // 'all' or 0-4
   planMode: 'mine',      // 'mine' or 'crew'
+  notifiedActs: loadNotifiedActs(),
   heatDay: 'all',
   sheet: null,           // {type:'detail',actIdx} | {type:'clash',actIdxs:[]} | {type:'crew'} | {type:'photo'} | {type:'live-picker'}
   liveStagePick: null,
   liveActPick: '',
+  liveTempPhoto: null,
+  genreSelections: new Set(),
+  crewBingo: {},
 };
 
 function loadIdentity(){
@@ -412,6 +471,12 @@ function loadIdentity(){
       state.userId = obj.userId;
       state.name = obj.name;
       state.code = obj.code;
+    }
+  }catch(e){}
+  try{
+    if(state.code){
+      const cached = localStorage.getItem('boomtown_crew_cache_'+state.code);
+      if(cached) state.crewUsers = JSON.parse(cached);
     }
   }catch(e){}
 }
@@ -434,8 +499,33 @@ function attachListener(){
   usersRef = db.ref(`crews/${state.code}/users`);
   usersRef.on('value', snap => {
     state.crewUsers = snap.val() || {};
+    try{ localStorage.setItem('boomtown_crew_cache_'+state.code, JSON.stringify(state.crewUsers)); }catch(e){}
     render();
   });
+  attachBingoListener();
+}
+let bingoRef = null;
+function attachBingoListener(){
+  if(!FB_READY || !state.code) return;
+  if(bingoRef) bingoRef.off();
+  bingoRef = db.ref(`crews/${state.code}/bingo`);
+  bingoRef.on('value', snap => {
+    state.crewBingo = snap.val() || {};
+    render();
+  });
+}
+function toggleBingoItem(idx){
+  if(!FB_READY) return;
+  const key = 'b'+idx;
+  if(state.crewBingo[key]){
+    state.crewBingo = {...state.crewBingo};
+    delete state.crewBingo[key];
+    db.ref(`crews/${state.code}/bingo/${key}`).remove().catch(err=>console.error('Failed to update bingo:', err));
+  } else {
+    state.crewBingo = {...state.crewBingo, [key]: {by: state.userId, name: state.name, at: Date.now()}};
+    db.ref(`crews/${state.code}/bingo/${key}`).set({by: state.userId, name: state.name, at: firebase.database.ServerValue.TIMESTAMP})
+      .catch(err=>console.error('Failed to update bingo:', err));
+  }
 }
 function myUser(){ return state.crewUsers[state.userId] || {picks:{}}; }
 function myPicksList(){
@@ -474,6 +564,18 @@ function setPhoto(dataUrl){
   me.photo = dataUrl;
   db.ref(`crews/${state.code}/users/${state.userId}`).update({photo: dataUrl})
     .catch(err => console.error('Failed to save photo:', err));
+}
+function setMyNote(actIdx, text){
+  if(!FB_READY) return;
+  const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
+  me.notes = me.notes || {};
+  if(text) me.notes['a'+actIdx] = text; else delete me.notes['a'+actIdx];
+  db.ref(`crews/${state.code}/users/${state.userId}`).update({['notes/a'+actIdx]: text || null})
+    .catch(err => console.error('Failed to save note:', err));
+}
+function myNoteFor(actIdx){
+  const u = myUser();
+  return (u.notes && u.notes['a'+actIdx]) || '';
 }
 function leaveCrewRemote(){
   if(!FB_READY) return;
@@ -538,6 +640,10 @@ function render(){
   if(!FB_READY){ root.innerHTML = renderSetupNotice(); return; }
   if(!state.userId || !state.code){
     root.innerHTML = renderOnboarding();
+    return;
+  }
+  if(state.onboardStep === 'genres'){
+    root.innerHTML = renderGenreQuiz();
     return;
   }
   root.innerHTML = renderShell();
@@ -608,6 +714,7 @@ function doStartCrew(){
     .catch(err => console.error('Failed to create user:', err));
   saveIdentity();
   attachListener();
+  state.onboardStep = 'genres';
   render();
 }
 function doJoinCrew(){
@@ -625,11 +732,48 @@ function doJoinCrew(){
       .catch(err => console.error('Failed to join crew:', err));
     saveIdentity();
     attachListener();
+    state.onboardStep = 'genres';
     render();
   }).catch((err)=>{
     console.error('Failed to join crew:', err);
     state.joinError = 'Something went wrong — try again.';
     render();
+  });
+}
+function renderGenreQuiz(){
+  const selected = state.genreSelections;
+  const chips = Object.keys(GENRE_KEYWORDS).map(g=>
+    `<button class="pill ${selected.has(g)?'active':''}" data-action="toggle-genre" data-genre="${escapeHtml(g)}">${escapeHtml(g)}</button>`
+  ).join('');
+  return `
+  <div class="onboard">
+    <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
+    <div class="onboard-card">
+      <div style="text-align:left;">
+        <strong style="font-family:var(--font-head);font-size:16px;">Quick start (optional)</strong>
+        <p style="color:var(--text-dim);font-size:13.5px;margin:6px 0 14px;">Pick a few genres you're into and we'll tag some MAYBE picks to get you started. You can change these anytime.</p>
+      </div>
+      <div class="pillrow" style="flex-wrap:wrap;overflow:visible;">${chips}</div>
+      <button class="btn primary block" style="margin-top:16px;" data-action="apply-genre-quiz">Add suggested picks</button>
+      <button class="link-btn" data-action="skip-genre-quiz">Skip</button>
+    </div>
+  </div>`;
+}
+function applyGenreQuiz(){
+  const selected = state.genreSelections;
+  if(!selected.size) return;
+  const MAX_PER_GENRE = 15;
+  selected.forEach(genre=>{
+    const keywords = GENRE_KEYWORDS[genre] || [];
+    let count = 0;
+    for(let i=0; i<ACTS.length && count<MAX_PER_GENRE; i++){
+      if(myTagFor(i)) continue;
+      const hay = (ACTS[i][4]+' '+STAGES[ACTS[i][0]]).toLowerCase();
+      if(keywords.some(k=>hay.includes(k))){
+        setMyPick(i, 'maybe');
+        count++;
+      }
+    }
   });
 }
 
@@ -671,6 +815,7 @@ function iconList(){return `<svg viewBox="0 0 24 24" fill="none" stroke="current
 function iconPlan(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4-6 4V3z"/></svg>`;}
 function iconHeat(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c2 3-2 4-2 7a4 4 0 108 0c0-1-.5-2-1-2 .5 2-1 3-2 2 1.5-3-1-4-1-5-1 1-2 1.5-2 3 0 2 2 3 2 5a5 5 0 11-10 0c0-4 4-6 4-10z"/></svg>`;}
 function iconLive(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5 12a7 7 0 0110-6M19 12a7 7 0 01-10 6M2 12a10 10 0 0114-9M22 12a10 10 0 01-14 9"/></svg>`;}
+function iconBell(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>`;}
 
 function renderAvatar(user, uid, sizeClass, ring){
   const name = (user && user.name) || '?';
@@ -943,6 +1088,45 @@ function renderClashSheet(actIdxs){
 /* ---------------------------------------------------------------------
    My Plan tab
    --------------------------------------------------------------------- */
+function buildShareText(actIdxs){
+  if(!actIdxs.length) return '';
+  const label = state.planDay==='all' ? 'My Boomtown plan' : `My Boomtown ${DAY_FULL[state.planDay]}`;
+  const lines = [label+':'];
+  let lastDay = null;
+  actIdxs.forEach(idx=>{
+    const act = ACTS[idx];
+    if(state.planDay==='all' && act[1]!==lastDay){
+      lines.push('', DAY_FULL[act[1]]+':');
+      lastDay = act[1];
+    }
+    lines.push(`${act[2]} ${act[4]} @ ${STAGES[act[0]]}`);
+  });
+  lines.push('', `Join my crew on Boomtown Crew: code ${state.code}`);
+  return lines.join('\n');
+}
+function icsEscape(s){
+  return String(s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\n/g,'\\n');
+}
+function icsDate(d){
+  return d.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z';
+}
+function buildICS(actIdxs){
+  const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Boomtown Crew//EN'];
+  actIdxs.forEach(idx=>{
+    const act = ACTS[idx];
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:boomtown-${idx}-${state.userId}@boomtownapp`,
+      `DTSTART:${icsDate(actStart(act))}`,
+      `DTEND:${icsDate(actEnd(act))}`,
+      `SUMMARY:${icsEscape(act[4])}`,
+      `LOCATION:${icsEscape(STAGES[act[0]])}`,
+      'END:VEVENT'
+    );
+  });
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n');
+}
 function allCrewPickedActIdxs(){
   const set = new Set();
   for(const uid in state.crewUsers){
@@ -979,15 +1163,11 @@ function renderNextUpCard(){
   }
   return html;
 }
-function renderPlanTab(){
-  const mode = state.planMode || 'mine';
-  const nextUp = mode==='mine' ? renderNextUpCard() : '';
-  const modeToggle = `
-    <div class="viewtoggle" style="margin-bottom:10px;">
-      <button class="${mode==='mine'?'active':''}" data-action="set-plan-mode" data-mode="mine">Mine</button>
-      <button class="${mode==='crew'?'active':''}" data-action="set-plan-mode" data-mode="crew">Crew</button>
-    </div>`;
-
+function renderNotifyBanner(){
+  if(typeof Notification === 'undefined' || Notification.permission !== 'default') return '';
+  return `<button class="btn block" data-action="enable-notifications" style="margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;">${iconBell()} Get reminders for your MUST picks</button>`;
+}
+function getFilteredPickIdxs(mode){
   let actIdxs = mode==='mine' ? myPicksList().map(p=>p.actIdx) : allCrewPickedActIdxs();
   if(state.planDay !== 'all'){
     actIdxs = actIdxs.filter(idx => ACTS[idx][1] === state.planDay);
@@ -996,6 +1176,24 @@ function renderPlanTab(){
     const ax=ACTS[x], ay=ACTS[y];
     return ax[1]-ay[1] || normMin(ax[2])-normMin(ay[2]);
   });
+  return actIdxs;
+}
+function renderPlanTab(){
+  const mode = state.planMode || 'mine';
+  const nextUp = mode==='mine' ? renderNextUpCard() : '';
+  const notifyBanner = mode==='mine' ? renderNotifyBanner() : '';
+  const modeToggle = `
+    <div class="viewtoggle" style="margin-bottom:10px;">
+      <button class="${mode==='mine'?'active':''}" data-action="set-plan-mode" data-mode="mine">Mine</button>
+      <button class="${mode==='crew'?'active':''}" data-action="set-plan-mode" data-mode="crew">Crew</button>
+    </div>`;
+
+  const actIdxs = getFilteredPickIdxs(mode);
+  const toolsRow = (mode==='mine' && actIdxs.length) ? `
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button class="btn ghost" style="flex:1;" data-action="share-plan">Share</button>
+      <button class="btn ghost" style="flex:1;" data-action="export-calendar">Add to calendar</button>
+    </div>` : '';
 
   const clashSet = mode==='mine' ? clashActIdxSet() : new Set();
   const emptyMsg = mode==='mine'
@@ -1015,13 +1213,14 @@ function renderPlanTab(){
     });
     return html;
   })();
-  return `${nextUp}${modeToggle}${renderDayPills('plan', true)}${body}`;
+  return `${notifyBanner}${nextUp}${modeToggle}${toolsRow}${renderDayPills('plan', true)}${body}`;
 }
 function renderPlanItem(actIdx, clashSet, mode){
   const act = ACTS[actIdx];
   const isClash = clashSet.has(actIdx);
   const myTag = myTagFor(actIdx);
   const avatars = renderTaggerAvatars(actIdx, mode==='mine' ? state.userId : null);
+  const note = mode==='mine' ? myNoteFor(actIdx) : '';
   return `
   <div class="plan-item ${isClash?'clash':''}">
     <div class="plan-top">
@@ -1037,6 +1236,10 @@ function renderPlanItem(actIdx, clashSet, mode){
     </div>
     ${avatars}
     ${isClash ? `<div class="clash-flag" style="margin-top:8px;">&#9888; Clashes with another pick</div>` : ''}
+    ${mode==='mine' ? `
+      ${note ? `<div class="note-text">${escapeHtml(note)}</div>` : ''}
+      <button class="link-btn" style="padding:6px 0 0;font-size:12px;" data-action="open-note" data-act="${actIdx}">${note?'Edit note':'+ Add note'}</button>
+    ` : ''}
   </div>`;
 }
 
@@ -1116,6 +1319,9 @@ function renderLiveTab(){
         ${actOptions.map(x=>`<option value="${x.i}" ${String(state.liveActPick)===String(x.i)?'selected':''}>${x.a[2]} ${escapeHtml(x.a[4])}</option>`).join('')}
       </select>
     </div>` : ''}
+    <div class="field-label">Add a photo (optional)</div>
+    ${state.liveTempPhoto ? `<div class="photo-preview-wrap"><div class="avatar lg" style="background-image:url('${state.liveTempPhoto.replace(/'/g,"%27")}')"></div></div>` : ''}
+    <label class="upload-label">${state.liveTempPhoto ? 'Change photo' : 'Add a quick photo'}<input type="file" id="liveFileInput" accept="image/*"></label>
     <button class="btn primary block" data-action="do-checkin" ${stagePick==null?'disabled':''}>Check in</button>
   </div>
   <div class="section-title">Crew right now</div>
@@ -1131,9 +1337,12 @@ function renderLiveCrewCards(){
     const u = state.crewUsers[uid];
     const stageName = STAGES[u.live.stage] || '?';
     const watching = (u.live.act != null && ACTS[u.live.act]) ? ACTS[u.live.act][4] : null;
+    const avatarHtml = u.live.photo
+      ? `<div class="avatar" style="background-image:url('${u.live.photo.replace(/'/g,"%27")}')"></div>`
+      : renderAvatar(u, uid, 'sm2');
     return `
     <div class="live-card" style="display:flex;gap:12px;align-items:center;">
-      ${renderAvatar(u, uid, 'sm2')}
+      ${avatarHtml}
       <div style="flex:1;min-width:0;">
         <div class="member-name">${escapeHtml(u.name||'?')} ${uid===state.userId?'(you)':''}</div>
         <div class="chip"><span class="dot" style="background:${stageColor(u.live.stage)};width:8px;height:8px;"></span>${escapeHtml(stageName)}</div>
@@ -1154,7 +1363,47 @@ function renderSheet(){
   if(state.sheet.type === 'clash') return overlay(stopClick(renderClashSheet(state.sheet.actIdxs)));
   if(state.sheet.type === 'crew') return overlay(stopClick(renderCrewSheet()));
   if(state.sheet.type === 'photo') return overlay(stopClick(renderPhotoSheet()));
+  if(state.sheet.type === 'note') return overlay(stopClick(renderNoteSheet(state.sheet.actIdx)));
+  if(state.sheet.type === 'bingo') return overlay(stopClick(renderBingoSheet()));
   return '';
+}
+function renderNoteSheet(actIdx){
+  const act = ACTS[actIdx];
+  const existing = myNoteFor(actIdx);
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Note</div>
+    <div class="sheet-sub">${escapeHtml(act[4])} &middot; ${escapeHtml(STAGES[act[0]])}</div>
+    <textarea id="noteInput" rows="3" placeholder="e.g. meet by the flag before this one">${escapeHtml(existing)}</textarea>
+    <div style="height:12px"></div>
+    <button class="btn primary block" data-action="save-note" data-act="${actIdx}">Save note</button>
+  </div>`;
+}
+function renderBingoSheet(){
+  const rows = BINGO_ITEMS.map((text, idx)=>{
+    const entry = state.crewBingo['b'+idx];
+    const badgeStyle = entry
+      ? 'background:var(--gold);color:#1a1210;'
+      : 'background:var(--card2);color:var(--text-dim);border:1.5px solid var(--border);';
+    return `
+    <div class="member-row" data-action="toggle-bingo" data-idx="${idx}" style="cursor:pointer;">
+      <div class="avatar sm" style="${badgeStyle}display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;">${entry?'&#10003;':''}</div>
+      <div style="flex:1;">
+        <div class="member-name" style="${entry?'text-decoration:line-through;color:var(--text-dim);':''}">${escapeHtml(text)}</div>
+        ${entry ? `<div class="member-counts">by ${escapeHtml(entry.name||'someone')}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Festival Bingo</div>
+    <div class="sheet-sub">Tick things off together as a crew.</div>
+    ${rows}
+  </div>`;
 }
 function stopClick(html){
   return `<div data-action="stop">${html}</div>`;
@@ -1191,6 +1440,8 @@ function renderCrewSheet(){
     ${rows}
     <div style="height:16px"></div>
     <button class="btn block" data-action="open-photo">Edit my profile photo</button>
+    <div style="height:8px"></div>
+    <button class="btn block" data-action="open-bingo">Festival Bingo</button>
     <div style="height:8px"></div>
     <button class="btn block danger" data-action="leave-crew">Leave crew</button>
   </div>`;
@@ -1259,6 +1510,18 @@ document.addEventListener('click', function(e){
       state.onboardStep = 'join'; render(); return;
     case 'back-to-choice':
       state.onboardStep = 'choice'; render(); return;
+    case 'toggle-genre': {
+      const g = btn.dataset.genre;
+      if(state.genreSelections.has(g)) state.genreSelections.delete(g); else state.genreSelections.add(g);
+      render(); return;
+    }
+    case 'apply-genre-quiz':
+      applyGenreQuiz();
+      state.onboardStep = null;
+      render(); return;
+    case 'skip-genre-quiz':
+      state.onboardStep = null;
+      render(); return;
     case 'back-to-name':
       state.onboardStep = 'name'; render(); return;
     case 'set-tab':
@@ -1271,6 +1534,49 @@ document.addEventListener('click', function(e){
       state.planMode = btn.dataset.mode; render(); return;
     case 'remove-pick':
       setMyPick(parseInt(btn.dataset.act,10), null); render(); return;
+    case 'enable-notifications':
+      if(typeof Notification !== 'undefined') Notification.requestPermission().then(()=>render());
+      return;
+    case 'open-note':
+      state.sheet = {type:'note', actIdx: parseInt(btn.dataset.act,10)}; render(); return;
+    case 'save-note': {
+      const actIdx = parseInt(btn.dataset.act,10);
+      const input = document.getElementById('noteInput');
+      setMyNote(actIdx, input ? input.value.trim() : '');
+      state.sheet = null; render(); return;
+    }
+    case 'toggle-bingo':
+      toggleBingoItem(parseInt(btn.dataset.idx,10)); render(); return;
+    case 'open-bingo':
+      state.sheet = {type:'bingo'}; render(); return;
+    case 'share-plan': {
+      const text = buildShareText(getFilteredPickIdxs('mine'));
+      if(!text) return;
+      if(navigator.share){
+        navigator.share({title:'My Boomtown plan', text}).catch(()=>{});
+      } else if(navigator.clipboard){
+        navigator.clipboard.writeText(text).then(()=>{
+          const label = btn.textContent;
+          btn.textContent = 'Copied!';
+          setTimeout(()=>{ btn.textContent = label; }, 1200);
+        }).catch(()=>{});
+      }
+      return;
+    }
+    case 'export-calendar': {
+      const ics = buildICS(getFilteredPickIdxs('mine'));
+      if(!ics) return;
+      const blob = new Blob([ics], {type:'text/calendar'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'boomtown-plan.ics';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url), 1000);
+      return;
+    }
     case 'set-heat-day':
       state.heatDay = btn.dataset.day==='all' ? 'all' : parseInt(btn.dataset.day,10); render(); return;
     case 'set-lineup-view':
@@ -1330,6 +1636,7 @@ document.addEventListener('click', function(e){
       return;
     }
     case 'leave-live':
+      state.liveTempPhoto = null;
       setLive(null); render(); return;
     case 'do-checkin': {
       const sel = document.getElementById('liveStageSelect');
@@ -1337,8 +1644,8 @@ document.addEventListener('click', function(e){
       const stage = sel ? parseInt(sel.value,10) : null;
       if(stage==null || isNaN(stage)) return;
       const act = actSel && actSel.value !== '' ? parseInt(actSel.value,10) : null;
-      setLive({stage, act, since: firebase.database.ServerValue.TIMESTAMP});
-      state.liveStagePick = null; state.liveActPick='';
+      setLive({stage, act, photo: state.liveTempPhoto || null, since: firebase.database.ServerValue.TIMESTAMP});
+      state.liveStagePick = null; state.liveActPick=''; state.liveTempPhoto = null;
       render();
       return;
     }
@@ -1404,6 +1711,20 @@ document.addEventListener('change', function(e){
     reader.readAsDataURL(file);
     return;
   }
+  if(e.target.id === 'liveFileInput'){
+    const file = e.target.files && e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      cropToSquareJpeg(reader.result, 96, (dataUrl) => {
+        if(!dataUrl) return;
+        state.liveTempPhoto = dataUrl;
+        render();
+      });
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
 });
 
 let pendingPhoto = null;
@@ -1452,7 +1773,13 @@ document.addEventListener('click', function(e){
 loadIdentity();
 if(state.userId && state.code) attachListener();
 render();
-setInterval(()=>{ if((state.tab==='live' || state.tab==='plan') && !state.sheet) render(); }, 30000);
+setInterval(()=>{
+  checkUpcomingNotifications();
+  if((state.tab==='live' || state.tab==='plan') && !state.sheet) render();
+}, 30000);
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./sw.js').catch(()=>{});
+}
 </script>
 </body>
 </html>
