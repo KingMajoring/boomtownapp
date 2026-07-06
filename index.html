@@ -460,6 +460,7 @@ const state = {
   liveTempPhoto: null,
   genreSelections: new Set(),
   crewBingo: {},
+  groupOwner: null,
 };
 
 function loadIdentity(){
@@ -503,6 +504,21 @@ function attachListener(){
     render();
   });
   attachBingoListener();
+  attachGroupListener();
+}
+let groupRef = null;
+function attachGroupListener(){
+  if(!FB_READY || !state.code) return;
+  if(groupRef) groupRef.off();
+  groupRef = db.ref(`crews/${state.code}/group`);
+  groupRef.on('value', snap => {
+    const g = snap.val();
+    state.groupOwner = g ? g.by : null;
+    render();
+  });
+}
+function isCrewOwner(){
+  return !!state.groupOwner && state.groupOwner === state.userId;
 }
 let bingoRef = null;
 function attachBingoListener(){
@@ -576,6 +592,25 @@ function setMyNote(actIdx, text){
 function myNoteFor(actIdx){
   const u = myUser();
   return (u.notes && u.notes['a'+actIdx]) || '';
+}
+function setMemberName(uid, newName){
+  if(!FB_READY || !newName) return;
+  state.crewUsers[uid] = state.crewUsers[uid] || {picks:{}};
+  state.crewUsers[uid].name = newName;
+  db.ref(`crews/${state.code}/users/${uid}`).update({name: newName})
+    .catch(err=>console.error('Failed to update name:', err));
+  if(uid === state.userId){
+    state.name = newName;
+    saveIdentity();
+  }
+}
+function removeMember(uid){
+  if(!FB_READY) return;
+  const copy = {...state.crewUsers};
+  delete copy[uid];
+  state.crewUsers = copy;
+  db.ref(`crews/${state.code}/users/${uid}`).remove()
+    .catch(err=>console.error('Failed to remove member:', err));
 }
 function leaveCrewRemote(){
   if(!FB_READY) return;
@@ -1365,7 +1400,21 @@ function renderSheet(){
   if(state.sheet.type === 'photo') return overlay(stopClick(renderPhotoSheet()));
   if(state.sheet.type === 'note') return overlay(stopClick(renderNoteSheet(state.sheet.actIdx)));
   if(state.sheet.type === 'bingo') return overlay(stopClick(renderBingoSheet()));
+  if(state.sheet.type === 'editname') return overlay(stopClick(renderEditNameSheet(state.sheet.uid)));
   return '';
+}
+function renderEditNameSheet(uid){
+  const u = state.crewUsers[uid] || {};
+  const isMe = uid === state.userId;
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">${isMe ? 'Edit my name' : `Edit ${escapeHtml(u.name||'name')}`}</div>
+    <input id="editNameInput" value="${escapeHtml(u.name||'')}" maxlength="24" placeholder="Name">
+    <div style="height:12px"></div>
+    <button class="btn primary block" data-action="save-edit-name" data-uid="${uid}">Save</button>
+  </div>`;
 }
 function renderNoteSheet(actIdx){
   const act = ACTS[actIdx];
@@ -1420,14 +1469,20 @@ function renderCrewSheet(){
     let must=0, maybe=0;
     Object.values(picks).forEach(t=>{ if(t==='must') must++; else if(t==='maybe') maybe++; });
     const isLive = u.live && u.live.stage != null;
+    const isMe = uid === state.userId;
+    const isOwner = uid === state.groupOwner;
+    const canEdit = isMe || isCrewOwner();
+    const canRemove = isCrewOwner() && !isMe;
     return `
     <div class="member-row">
       ${renderAvatar(u, uid, 'sm2')}
-      <div>
-        <div class="member-name">${escapeHtml(u.name||'?')}${uid===state.userId?' (you)':''}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="member-name">${escapeHtml(u.name||'?')}${isMe?' (you)':''}${isOwner?' <span class="tagpill must">OWNER</span>':''}</div>
         <div class="member-counts">${must} must &middot; ${maybe} maybe</div>
       </div>
-      ${isLive?'<span class="live-dot"></span>':''}
+      ${isLive?'<span class="live-dot" style="margin-left:0;"></span>':''}
+      ${canEdit ? `<button class="link-btn" style="padding:4px 2px;" data-action="open-edit-name" data-uid="${uid}">Edit</button>` : ''}
+      ${canRemove ? `<button class="link-btn" style="padding:4px 2px;color:var(--red);" data-action="remove-member" data-uid="${uid}">Remove</button>` : ''}
     </div>`;
   }).join('');
   return `
@@ -1631,6 +1686,24 @@ document.addEventListener('click', function(e){
       if(confirm('Leave this crew? Your picks will be removed from the crew.')){
         leaveCrewRemote();
         clearIdentity();
+        render();
+      }
+      return;
+    }
+    case 'open-edit-name':
+      state.sheet = {type:'editname', uid: btn.dataset.uid}; render(); return;
+    case 'save-edit-name': {
+      const uid = btn.dataset.uid;
+      const input = document.getElementById('editNameInput');
+      const val = input ? input.value.trim() : '';
+      if(val) setMemberName(uid, val);
+      state.sheet = null; render(); return;
+    }
+    case 'remove-member': {
+      const uid = btn.dataset.uid;
+      const name = (state.crewUsers[uid] && state.crewUsers[uid].name) || 'this person';
+      if(confirm(`Remove ${name} from the crew?`)){
+        removeMember(uid);
         render();
       }
       return;
