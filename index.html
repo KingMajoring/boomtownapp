@@ -235,6 +235,15 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .crew-map-slot{height:340px;border-radius:14px;overflow:hidden;background:var(--card2);border:1px solid var(--border);}
 .crew-map{width:100%;height:100%;}
 
+/* photo gallery */
+.gallery-actions{display:flex;gap:10px;margin-bottom:14px;}
+.gallery-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;}
+.gallery-cell{padding:0;border:none;background:var(--card2);border-radius:8px;overflow:hidden;aspect-ratio:1;}
+.gallery-cell img{width:100%;height:100%;object-fit:cover;display:block;}
+.gallery-preview{margin-bottom:14px;}
+.gallery-preview img{width:100%;max-height:300px;object-fit:contain;border-radius:12px;background:var(--card2);}
+.gallery-view img{width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--card2);}
+
 /* chat */
 .chat-thread{max-height:65vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:8px;}
 .chat-msg{display:flex;}
@@ -433,6 +442,16 @@ function actStart(act){
 function actEnd(act){
   return new Date(new Date(FEST_DATES[act[1]]+'T00:00:00').getTime() + normMin(act[3])*60000);
 }
+function currentActAtStage(stageIdx){
+  const now = new Date();
+  const today = FEST_DATES.indexOf(now.toISOString().slice(0,10));
+  if(today < 0) return null;
+  for(let i=0;i<ACTS.length;i++){
+    const a = ACTS[i];
+    if(a[0]===stageIdx && a[1]===today && actStart(a) <= now && now < actEnd(a)) return i;
+  }
+  return null;
+}
 function formatCountdown(ms){
   if(ms <= 0) return 'now';
   const totalMin = Math.round(ms/60000);
@@ -523,6 +542,10 @@ const state = {
   liveView: 'list',      // 'list' | 'map'
   sharingLocation: false,
   locationError: null,
+  galleryPhotos: {},     // live from firebase: { key: {uid,name,photo,stage,place,act,at} }
+  galleryTemp: null,     // staged data URL awaiting save
+  galleryLocPick: '',    // '' | 'camp' | 'wandering' | 's:<stageIdx>'
+  galleryActPick: '',
 };
 
 function loadIdentity(){
@@ -578,6 +601,7 @@ function attachListener(){
   attachBingoListener();
   attachGroupListener();
   attachChatListener();
+  attachGalleryListener();
 }
 function handleRemovedFromCrew(){
   const removedCode = state.code;
@@ -600,7 +624,9 @@ function detachListeners(){
   if(bingoRef){ bingoRef.off(); bingoRef = null; }
   if(groupRef){ groupRef.off(); groupRef = null; }
   if(chatRef){ chatRef.off(); chatRef = null; }
+  if(galleryRef){ galleryRef.off(); galleryRef = null; }
   state.chatMessages = {};
+  state.galleryPhotos = {};
   clearGeoWatch();
   crewMapInstance = null;
   crewMapMarkers = {};
@@ -687,6 +713,7 @@ function switchToCrew(code){
   state.crewUsers = {};
   state.groupOwner = null;
   state.chatMessages = {};
+  state.galleryPhotos = {};
   state.crewEntered = true;
   state.onboardStep = null;
   state.renamingCrewCode = null;
@@ -795,6 +822,50 @@ function sendChatMessage(text, opts){
   state.chatMessages = Object.assign({}, state.chatMessages, {[key]: msg});
   db.ref(`crews/${state.code}/chat/${key}`).set(Object.assign({}, msg, {at: firebase.database.ServerValue.TIMESTAMP}))
     .catch(err => console.error('Failed to send chat message:', err));
+}
+let galleryRef = null;
+function attachGalleryListener(){
+  if(!FB_READY || !state.code) return;
+  if(galleryRef) galleryRef.off();
+  galleryRef = db.ref(`crews/${state.code}/gallery`);
+  galleryRef.on('value', snap => {
+    state.galleryPhotos = snap.val() || {};
+    render();
+  });
+}
+function saveGalleryPhoto(){
+  if(!FB_READY || !state.code || !state.galleryTemp) return;
+  const key = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+  const loc = state.galleryLocPick;
+  const entry = {
+    uid: state.userId,
+    name: state.name,
+    photo: state.galleryTemp,
+    stage: loc.startsWith('s:') ? parseInt(loc.slice(2),10) : null,
+    place: (loc==='camp'||loc==='wandering') ? loc : null,
+    act: state.galleryActPick !== '' ? parseInt(state.galleryActPick,10) : null,
+    at: Date.now()
+  };
+  state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: entry});
+  db.ref(`crews/${state.code}/gallery/${key}`).set(Object.assign({}, entry, {at: firebase.database.ServerValue.TIMESTAMP}))
+    .catch(err => console.error('Failed to save gallery photo:', err));
+  state.galleryTemp = null;
+  state.galleryLocPick = '';
+  state.galleryActPick = '';
+  state.sheet = null;
+}
+function deleteGalleryPhoto(key){
+  if(!FB_READY || !state.code) return;
+  state.galleryPhotos = Object.assign({}, state.galleryPhotos);
+  delete state.galleryPhotos[key];
+  db.ref(`crews/${state.code}/gallery/${key}`).remove()
+    .catch(err => console.error('Failed to delete gallery photo:', err));
+}
+function galleryLocationLabel(p){
+  if(p.stage != null && STAGES[p.stage]) return STAGES[p.stage];
+  if(p.place === 'camp') return 'Around camp';
+  if(p.place === 'wandering') return 'Wandering about';
+  return null;
 }
 function myUser(){ return state.crewUsers[state.userId] || {picks:{}}; }
 function myPicksList(){
@@ -1362,6 +1433,7 @@ function renderShell(){
       ${navBtn('heat','Heat', iconHeat(), clashCount, false)}
       ${navBtn('live','Live', iconLive(), clashCount, false)}
       ${navBtn('chat','Chat', iconChat(), clashCount, false)}
+      ${navBtn('photos','Photos', iconCamera(), clashCount, false)}
     </div>
     ${renderSheet()}
   `;
@@ -1377,6 +1449,7 @@ function iconHeat(){return `<svg viewBox="0 0 24 24" fill="none" stroke="current
 function iconLive(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M5 12a7 7 0 0110-6M19 12a7 7 0 01-10 6M2 12a10 10 0 0114-9M22 12a10 10 0 01-14 9"/></svg>`;}
 function iconBell(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>`;}
 function iconChat(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>`;}
+function iconCamera(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>`;}
 
 function renderAvatar(user, uid, sizeClass, ring){
   const name = (user && user.name) || '?';
@@ -1407,6 +1480,7 @@ function renderTab(){
   if(state.tab==='heat') return renderHeatTab();
   if(state.tab==='live') return renderLiveTab();
   if(state.tab==='chat') return renderChatTab();
+  if(state.tab==='photos') return renderPhotosTab();
   return '';
 }
 
@@ -2009,6 +2083,82 @@ function renderChatText(text){
 }
 
 /* ---------------------------------------------------------------------
+   Photos tab (crew gallery)
+   --------------------------------------------------------------------- */
+function renderPhotosTab(){
+  const keys = Object.keys(state.galleryPhotos).sort((a,b) => (state.galleryPhotos[b].at||0) - (state.galleryPhotos[a].at||0));
+  const cells = keys.map(k => {
+    const p = state.galleryPhotos[k];
+    return `<button class="gallery-cell" data-action="open-gallery-photo" data-key="${k}"><img src="${p.photo}" alt="" loading="lazy"></button>`;
+  }).join('');
+  return `
+  <div class="gallery-actions">
+    <label class="btn primary" style="flex:1;text-align:center;">Take a photo<input type="file" id="galleryCameraInput" accept="image/*" capture="environment" hidden></label>
+    <label class="btn" style="flex:1;text-align:center;">From gallery<input type="file" id="galleryPickInput" accept="image/*" hidden></label>
+  </div>
+  ${keys.length
+    ? `<div class="gallery-grid">${cells}</div>`
+    : `<div class="empty-state">No photos yet — snap the first one!</div>`}
+  `;
+}
+function renderGalleryComposeSheet(){
+  const loc = state.galleryLocPick;
+  const stageIdx = loc.startsWith('s:') ? parseInt(loc.slice(2),10) : null;
+  const stageOptions = STAGES.map((s,i)=>({s,i})).sort((a,b)=>a.s.localeCompare(b.s))
+    .map(({s,i})=>`<option value="s:${i}" ${loc==='s:'+i?'selected':''}>${escapeHtml(s)}</option>`).join('');
+  let actField = '';
+  if(stageIdx != null){
+    const opts = ACTS.map((a,i)=>({a,i})).filter(x=>x.a[0]===stageIdx)
+      .sort((x,y)=> x.a[1]-y.a[1] || normMin(x.a[2])-normMin(y.a[2]))
+      .map(x=>`<option value="${x.i}" ${String(state.galleryActPick)===String(x.i)?'selected':''}>${DAY_LABELS[x.a[1]]} &middot; ${x.a[2]} ${escapeHtml(x.a[4])}</option>`).join('');
+    actField = `
+    <div class="field-label">Who's playing? (optional)</div>
+    <div class="field-group">
+      <select id="galleryActSelect">
+        <option value="">Not act-related&hellip;</option>
+        ${opts}
+      </select>
+    </div>`;
+  }
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Add to crew gallery</div>
+    <div class="gallery-preview"><img src="${state.galleryTemp}" alt=""></div>
+    <div class="field-label">Where was this? (optional)</div>
+    <div class="field-group">
+      <select id="galleryLocSelect">
+        <option value="">No location</option>
+        <option value="camp" ${loc==='camp'?'selected':''}>Around camp</option>
+        <option value="wandering" ${loc==='wandering'?'selected':''}>Wandering about</option>
+        ${stageOptions}
+      </select>
+    </div>
+    ${actField}
+    <button class="btn primary block" data-action="save-gallery-photo">Add photo</button>
+  </div>`;
+}
+function renderGalleryViewSheet(key){
+  const p = state.galleryPhotos[key];
+  if(!p) return '';
+  const locLabel = galleryLocationLabel(p);
+  const actLabel = (p.act != null && ACTS[p.act]) ? ACTS[p.act][4] : null;
+  const canDelete = p.uid === state.userId || isCrewOwner();
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="gallery-view"><img src="${p.photo}" alt=""></div>
+    <div class="sheet-title" style="margin-top:10px;">${escapeHtml(p.name||'?')}</div>
+    <div class="sheet-sub">
+      ${actLabel ? escapeHtml(actLabel)+' &middot; ' : ''}${locLabel ? escapeHtml(locLabel)+' &middot; ' : ''}${escapeHtml(formatClockTime(p.at))}
+    </div>
+    ${canDelete ? `<div style="height:10px"></div><button class="btn block danger" data-action="delete-gallery-photo" data-key="${key}">Delete photo</button>` : ''}
+  </div>`;
+}
+
+/* ---------------------------------------------------------------------
    Sheets (crew / photo)
    --------------------------------------------------------------------- */
 function renderSheet(){
@@ -2021,6 +2171,8 @@ function renderSheet(){
   if(state.sheet.type === 'note') return overlay(stopClick(renderNoteSheet(state.sheet.actIdx)));
   if(state.sheet.type === 'bingo') return overlay(stopClick(renderBingoSheet()));
   if(state.sheet.type === 'editname') return overlay(stopClick(renderEditNameSheet(state.sheet.uid)));
+  if(state.sheet.type === 'photocompose') return overlay(stopClick(renderGalleryComposeSheet()));
+  if(state.sheet.type === 'photoview') return overlay(stopClick(renderGalleryViewSheet(state.sheet.key)));
   return '';
 }
 function renderEditNameSheet(uid){
@@ -2163,6 +2315,25 @@ function cropToSquareJpeg(imgSrc, size, cb){
     }
   };
   img.onerror = (e) => { console.error('Failed to load photo for cropping:', e); cb(null); };
+  img.src = imgSrc;
+}
+function downscaleJpeg(imgSrc, maxDim, cb){
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    try{
+      cb(canvas.toDataURL('image/jpeg', 0.72));
+    }catch(e){
+      console.error('Failed to process photo:', e);
+      cb(null);
+    }
+  };
+  img.onerror = (e) => { console.error('Failed to load photo:', e); cb(null); };
   img.src = imgSrc;
 }
 
@@ -2408,6 +2579,17 @@ document.addEventListener('click', function(e){
     }
     case 'set-live-view':
       state.liveView = btn.dataset.view; render(); return;
+    case 'open-gallery-photo':
+      state.sheet = {type:'photoview', key: btn.dataset.key}; render(); return;
+    case 'save-gallery-photo':
+      saveGalleryPhoto(); render(); return;
+    case 'delete-gallery-photo':
+      if(confirm('Delete this photo from the crew gallery?')){
+        deleteGalleryPhoto(btn.dataset.key);
+        state.sheet = null;
+        render();
+      }
+      return;
     case 'start-sharing-location':
       startSharingLocation(); render(); return;
     case 'stop-sharing-location':
@@ -2536,6 +2718,39 @@ document.addEventListener('change', function(e){
       });
     };
     reader.readAsDataURL(file);
+    return;
+  }
+  if(e.target.id === 'galleryCameraInput' || e.target.id === 'galleryPickInput'){
+    const file = e.target.files && e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      downscaleJpeg(reader.result, 900, (dataUrl) => {
+        if(!dataUrl) return;
+        state.galleryTemp = dataUrl;
+        state.galleryLocPick = '';
+        state.galleryActPick = '';
+        state.sheet = {type:'photocompose'};
+        render();
+      });
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
+  if(e.target.id === 'galleryLocSelect'){
+    state.galleryLocPick = e.target.value;
+    if(state.galleryLocPick.startsWith('s:')){
+      // pre-set the act from whoever's playing this stage right now
+      const nowAct = currentActAtStage(parseInt(state.galleryLocPick.slice(2),10));
+      state.galleryActPick = nowAct != null ? String(nowAct) : '';
+    } else {
+      state.galleryActPick = '';
+    }
+    render();
+    return;
+  }
+  if(e.target.id === 'galleryActSelect'){
+    state.galleryActPick = e.target.value;
     return;
   }
 });
