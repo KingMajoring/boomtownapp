@@ -243,6 +243,11 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .gallery-cell-name{position:absolute;left:0;right:0;bottom:0;padding:10px 6px 4px;font-size:10.5px;font-weight:600;color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.65));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .gallery-filters{margin-bottom:12px;display:flex;flex-direction:column;gap:6px;}
 .chip-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
+
+/* broadcast announcement popup */
+.broadcast-overlay{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;padding:28px;}
+.broadcast-card{background:var(--card);border:1px solid var(--gold);border-radius:16px;padding:22px;max-width:380px;width:100%;display:flex;flex-direction:column;gap:14px;}
+.broadcast-text{font-size:15px;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
 .gallery-preview{margin-bottom:14px;}
 .gallery-preview img{width:100%;max-height:300px;object-fit:contain;border-radius:12px;background:var(--card2);}
 .gallery-view img{width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--card2);}
@@ -551,6 +556,9 @@ const state = {
   galleryActPick: '',
   galleryFilterUids: new Set(),
   galleryFilterLocs: new Set(),
+  isAdmin: false,
+  broadcastMsg: null,        // unseen announcement {id,text} pending "Got it"
+  seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
 };
 
 function loadIdentity(){
@@ -654,14 +662,50 @@ function signOutUser(){
 }
 function ensureProfile(){
   db.ref(`profiles/${state.userId}`).once('value').then(snap=>{
-    if(snap.exists() && snap.val().name){
-      state.name = snap.val().name;
+    const val = snap.exists() ? snap.val() : {};
+    if(val.name){
+      state.name = val.name;
     } else {
       db.ref(`profiles/${state.userId}`).update({name: state.name, created: firebase.database.ServerValue.TIMESTAMP})
         .catch(err=>console.error('Failed to create profile:', err));
     }
+    state.seenBroadcastId = val.seenBroadcast || null;
+    checkBroadcast();
+    checkAdmin();
     render();
   }).catch(err=>console.error('Failed to load profile:', err));
+}
+function checkBroadcast(){
+  db.ref('broadcast').once('value').then(snap => {
+    const b = snap.val();
+    if(b && b.id && b.text && b.id !== state.seenBroadcastId){
+      state.broadcastMsg = b;
+      render();
+    }
+  }).catch(err => console.error('Failed to check announcements:', err));
+}
+function dismissBroadcast(){
+  if(!state.broadcastMsg) return;
+  state.seenBroadcastId = state.broadcastMsg.id;
+  state.broadcastMsg = null;
+  db.ref(`profiles/${state.userId}`).update({seenBroadcast: state.seenBroadcastId})
+    .catch(err => console.error('Failed to mark announcement seen:', err));
+}
+function checkAdmin(){
+  db.ref(`admins/${state.userId}`).once('value').then(snap => {
+    const admin = snap.val() === true;
+    if(admin !== state.isAdmin){ state.isAdmin = admin; render(); }
+  }).catch(() => { /* not an admin - rules deny the read */ });
+}
+function sendBroadcast(text){
+  const trimmed = (text||'').trim();
+  if(!trimmed || !state.isAdmin) return;
+  const id = 'b' + Date.now().toString(36);
+  state.seenBroadcastId = id; // don't show the admin their own announcement
+  db.ref('broadcast').set({id, text: trimmed, at: firebase.database.ServerValue.TIMESTAMP, by: state.userId})
+    .catch(err => console.error('Failed to send announcement:', err));
+  db.ref(`profiles/${state.userId}`).update({seenBroadcast: id})
+    .catch(err => console.error('Failed to mark announcement seen:', err));
 }
 function loadMyCrews(){
   if(!FB_READY || !state.userId) return;
@@ -1128,26 +1172,32 @@ function clashActIdxSet(){
    --------------------------------------------------------------------- */
 function render(){
   const root = document.getElementById('app');
-  if(!FB_READY){ root.innerHTML = renderSetupNotice(); return; }
-  if(!state.authReady){ root.innerHTML = renderLoadingScreen(); return; }
-  if(!state.userId){ root.innerHTML = renderSignIn(); return; }
-  if(!state.crewEntered){
-    if(!state.myCrewsLoaded){ root.innerHTML = renderLoadingScreen(); return; }
-    root.innerHTML = renderOnboarding();
-    return;
-  }
-  if(state.onboardStep === 'genres'){
-    root.innerHTML = renderGenreQuiz();
-    return;
-  }
-  root.innerHTML = renderShell();
-  if(state.tab === 'chat'){
+  let html, isShell = false;
+  if(!FB_READY){ html = renderSetupNotice(); }
+  else if(!state.authReady){ html = renderLoadingScreen(); }
+  else if(!state.userId){ html = renderSignIn(); }
+  else if(!state.crewEntered){ html = state.myCrewsLoaded ? renderOnboarding() : renderLoadingScreen(); }
+  else if(state.onboardStep === 'genres'){ html = renderGenreQuiz(); }
+  else { html = renderShell(); isShell = true; }
+  if(state.userId && state.broadcastMsg) html += renderBroadcastPopup();
+  root.innerHTML = html;
+  if(isShell && state.tab === 'chat'){
     const thread = document.getElementById('chatThread');
     if(thread) thread.scrollTop = thread.scrollHeight;
   }
-  if(state.tab === 'live' && state.liveView === 'map'){
+  if(isShell && state.tab === 'live' && state.liveView === 'map'){
     renderGoogleMapNow();
   }
+}
+function renderBroadcastPopup(){
+  return `
+  <div class="broadcast-overlay">
+    <div class="broadcast-card">
+      <div class="sheet-title">A message from the app team</div>
+      <div class="broadcast-text">${escapeHtml(state.broadcastMsg.text)}</div>
+      <button class="btn primary block" data-action="dismiss-broadcast">Got it</button>
+    </div>
+  </div>`;
 }
 function renderLoadingScreen(){
   return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div></div>`;
@@ -2227,7 +2277,20 @@ function renderSheet(){
   if(state.sheet.type === 'editname') return overlay(stopClick(renderEditNameSheet(state.sheet.uid)));
   if(state.sheet.type === 'photocompose') return overlay(stopClick(renderGalleryComposeSheet()));
   if(state.sheet.type === 'photoview') return overlay(stopClick(renderGalleryViewSheet(state.sheet.key)));
+  if(state.sheet.type === 'broadcastcompose') return overlay(stopClick(renderBroadcastComposeSheet()));
   return '';
+}
+function renderBroadcastComposeSheet(){
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Send announcement</div>
+    <div class="sheet-sub">Every user sees this once, as a popup, the next time they open the app signed in.</div>
+    <textarea id="broadcastInput" rows="4" maxlength="500" placeholder="e.g. New feature: crew photo gallery is live!"></textarea>
+    <div style="height:12px"></div>
+    <button class="btn primary block" data-action="send-broadcast">Send to everyone</button>
+  </div>`;
 }
 function renderEditNameSheet(uid){
   const u = state.crewUsers[uid] || {};
@@ -2325,6 +2388,7 @@ function renderCrewSheet(){
     <button class="btn block" data-action="open-bingo">Festival Bingo</button>
     <div style="height:8px"></div>
     <button class="btn block" data-action="switch-group">Switch group</button>
+    ${state.isAdmin ? `<div style="height:8px"></div><button class="btn block" data-action="open-broadcast-compose">Send announcement to all users</button>` : ''}
     <div style="height:8px"></div>
     <button class="btn block danger" data-action="leave-crew">Leave crew</button>
     <div style="height:8px"></div>
@@ -2649,6 +2713,21 @@ document.addEventListener('click', function(e){
       state.galleryFilterUids.clear();
       state.galleryFilterLocs.clear();
       render(); return;
+    case 'dismiss-broadcast':
+      dismissBroadcast(); render(); return;
+    case 'open-broadcast-compose':
+      state.sheet = {type:'broadcastcompose'}; render(); return;
+    case 'send-broadcast': {
+      const input = document.getElementById('broadcastInput');
+      const text = input ? input.value.trim() : '';
+      if(!text) return;
+      if(confirm('Send this announcement to every user of the app?')){
+        sendBroadcast(text);
+        state.sheet = null;
+        render();
+      }
+      return;
+    }
     case 'save-gallery-photo':
       saveGalleryPhoto(); render(); return;
     case 'delete-gallery-photo':
@@ -2884,6 +2963,9 @@ if(FB_READY){
       state.myCrews = {};
       state.myCrewsLoaded = false;
       state.onboardStep = null;
+      state.isAdmin = false;
+      state.broadcastMsg = null;
+      state.seenBroadcastId = null;
       saveIdentity();
     }
     render();
