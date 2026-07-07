@@ -1462,8 +1462,8 @@ function renderLineupList(){
   const stageIdxs = Object.keys(byStage).map(Number);
   // sort within each group by start time
   stageIdxs.forEach(si => byStage[si].sort((x,y)=>normMin(x.a[2])-normMin(y.a[2])));
-  // sort stages by their earliest set time
-  stageIdxs.sort((a,b)=> normMin(byStage[a][0].a[2]) - normMin(byStage[b][0].a[2]));
+  // sort stages alphabetically
+  stageIdxs.sort((a,b)=> STAGES[a].localeCompare(STAGES[b]));
 
   return stageIdxs.map(si => {
     const setsHtml = byStage[si].map(x => renderSetRow(x.i, x.a, search ? true : false)).join('');
