@@ -238,8 +238,11 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 /* photo gallery */
 .gallery-actions{display:flex;gap:10px;margin-bottom:14px;}
 .gallery-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;}
-.gallery-cell{padding:0;border:none;background:var(--card2);border-radius:8px;overflow:hidden;aspect-ratio:1;}
+.gallery-cell{padding:0;border:none;background:var(--card2);border-radius:8px;overflow:hidden;aspect-ratio:1;position:relative;}
 .gallery-cell img{width:100%;height:100%;object-fit:cover;display:block;}
+.gallery-cell-name{position:absolute;left:0;right:0;bottom:0;padding:10px 6px 4px;font-size:10.5px;font-weight:600;color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.65));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gallery-filters{margin-bottom:12px;display:flex;flex-direction:column;gap:6px;}
+.chip-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
 .gallery-preview{margin-bottom:14px;}
 .gallery-preview img{width:100%;max-height:300px;object-fit:contain;border-radius:12px;background:var(--card2);}
 .gallery-view img{width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--card2);}
@@ -546,6 +549,8 @@ const state = {
   galleryTemp: null,     // staged data URL awaiting save
   galleryLocPick: '',    // '' | 'camp' | 'wandering' | 's:<stageIdx>'
   galleryActPick: '',
+  galleryFilterUids: new Set(),
+  galleryFilterLocs: new Set(),
 };
 
 function loadIdentity(){
@@ -714,6 +719,8 @@ function switchToCrew(code){
   state.groupOwner = null;
   state.chatMessages = {};
   state.galleryPhotos = {};
+  state.galleryFilterUids = new Set();
+  state.galleryFilterLocs = new Set();
   state.crewEntered = true;
   state.onboardStep = null;
   state.renamingCrewCode = null;
@@ -2085,19 +2092,66 @@ function renderChatText(text){
 /* ---------------------------------------------------------------------
    Photos tab (crew gallery)
    --------------------------------------------------------------------- */
+function galleryPhotoLocKey(p){
+  if(p.stage != null) return 's:' + p.stage;
+  if(p.place) return p.place;
+  return null;
+}
+function galleryPhotographerName(p){
+  const u = state.crewUsers[p.uid];
+  return (u && u.name) || p.name || '?';
+}
 function renderPhotosTab(){
-  const keys = Object.keys(state.galleryPhotos).sort((a,b) => (state.galleryPhotos[b].at||0) - (state.galleryPhotos[a].at||0));
+  const all = Object.keys(state.galleryPhotos).sort((a,b) => (state.galleryPhotos[b].at||0) - (state.galleryPhotos[a].at||0));
+
+  // build filter chip options from what's actually in the gallery
+  const uidSet = new Set(), locSet = new Set();
+  all.forEach(k => {
+    const p = state.galleryPhotos[k];
+    uidSet.add(p.uid);
+    const lk = galleryPhotoLocKey(p);
+    if(lk) locSet.add(lk);
+  });
+  const locLabel = (lk) => lk === 'camp' ? 'Around camp' : (lk === 'wandering' ? 'Wandering about' : (STAGES[parseInt(lk.slice(2),10)] || '?'));
+  const userChips = [...uidSet]
+    .map(uid => ({uid, name: galleryPhotographerName(state.galleryPhotos[all.find(k=>state.galleryPhotos[k].uid===uid)])}))
+    .sort((a,b)=>a.name.localeCompare(b.name))
+    .map(({uid,name}) => `<button class="pill ${state.galleryFilterUids.has(uid)?'active':''}" data-action="toggle-gallery-filter-user" data-uid="${uid}">${escapeHtml(name)}</button>`).join('');
+  const locChips = [...locSet]
+    .sort((a,b)=>locLabel(a).localeCompare(locLabel(b)))
+    .map(lk => `<button class="pill ${state.galleryFilterLocs.has(lk)?'active':''}" data-action="toggle-gallery-filter-loc" data-loc="${lk}">${escapeHtml(locLabel(lk))}</button>`).join('');
+  const filtersActive = state.galleryFilterUids.size > 0 || state.galleryFilterLocs.size > 0;
+
+  const keys = all.filter(k => {
+    const p = state.galleryPhotos[k];
+    if(state.galleryFilterUids.size && !state.galleryFilterUids.has(p.uid)) return false;
+    if(state.galleryFilterLocs.size && !state.galleryFilterLocs.has(galleryPhotoLocKey(p))) return false;
+    return true;
+  });
   const cells = keys.map(k => {
     const p = state.galleryPhotos[k];
-    return `<button class="gallery-cell" data-action="open-gallery-photo" data-key="${k}"><img src="${p.photo}" alt="" loading="lazy"></button>`;
+    return `
+    <button class="gallery-cell" data-action="open-gallery-photo" data-key="${k}">
+      <img src="${p.photo}" alt="" loading="lazy">
+      <span class="gallery-cell-name">${escapeHtml(galleryPhotographerName(p))}</span>
+    </button>`;
   }).join('');
+
   return `
   <div class="gallery-actions">
     <label class="btn primary" style="flex:1;text-align:center;">Take a photo<input type="file" id="galleryCameraInput" accept="image/*" capture="environment" hidden></label>
     <label class="btn" style="flex:1;text-align:center;">From gallery<input type="file" id="galleryPickInput" accept="image/*" hidden></label>
   </div>
-  ${keys.length
-    ? `<div class="gallery-grid">${cells}</div>`
+  ${all.length ? `
+  <div class="gallery-filters">
+    ${userChips ? `<div class="field-label">Filter by person</div><div class="chip-row">${userChips}</div>` : ''}
+    ${locChips ? `<div class="field-label">Filter by place</div><div class="chip-row">${locChips}</div>` : ''}
+    ${filtersActive ? `<button class="link-btn" data-action="clear-gallery-filters" style="padding:4px 0;">Clear filters</button>` : ''}
+  </div>` : ''}
+  ${all.length
+    ? (keys.length
+        ? `<div class="gallery-grid">${cells}</div>`
+        : `<div class="empty-state">No photos match those filters.</div>`)
     : `<div class="empty-state">No photos yet — snap the first one!</div>`}
   `;
 }
@@ -2581,6 +2635,20 @@ document.addEventListener('click', function(e){
       state.liveView = btn.dataset.view; render(); return;
     case 'open-gallery-photo':
       state.sheet = {type:'photoview', key: btn.dataset.key}; render(); return;
+    case 'toggle-gallery-filter-user': {
+      const uid = btn.dataset.uid;
+      if(state.galleryFilterUids.has(uid)) state.galleryFilterUids.delete(uid); else state.galleryFilterUids.add(uid);
+      render(); return;
+    }
+    case 'toggle-gallery-filter-loc': {
+      const lk = btn.dataset.loc;
+      if(state.galleryFilterLocs.has(lk)) state.galleryFilterLocs.delete(lk); else state.galleryFilterLocs.add(lk);
+      render(); return;
+    }
+    case 'clear-gallery-filters':
+      state.galleryFilterUids.clear();
+      state.galleryFilterLocs.clear();
+      render(); return;
     case 'save-gallery-photo':
       saveGalleryPhoto(); render(); return;
     case 'delete-gallery-photo':
