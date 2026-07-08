@@ -99,6 +99,13 @@ h1,h2,h3{margin:0;font-family:var(--font-head);font-weight:700;}
 .topbar-right{display:flex;align-items:center;gap:8px;}
 .code-chip{font-family:var(--font-head);background:var(--card2);border:1px solid var(--border);color:var(--gold);padding:7px 12px;border-radius:20px;font-size:14px;letter-spacing:2px;font-weight:700;}
 .avatar-btn{padding:0;border:none;background:none;border-radius:50%;}
+.icon-btn{padding:6px;border:none;background:none;color:var(--text-dim);display:flex;align-items:center;justify-content:center;}
+.icon-btn svg{width:22px;height:22px;}
+
+/* help sheet */
+.help-list{max-height:65vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding-bottom:4px;}
+.help-section-title{font-family:var(--font-head);font-size:15px;color:var(--gold);margin-bottom:4px;}
+.help-section-body{font-size:13.5px;line-height:1.55;color:var(--text-dim);}
 
 /* avatars */
 .avatar{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;font-family:var(--font-head);color:#1a1210;flex-shrink:0;background-size:cover;background-position:center;border:2px solid transparent;}
@@ -1190,6 +1197,11 @@ function render(){
   if(isShell && state.tab === 'live' && state.liveView === 'map'){
     renderGoogleMapNow();
   }
+  if(isShell && state.sheet && state.sheet.type === 'help' && state.sheet.forTab){
+    const list = document.getElementById('helpList');
+    const el = document.getElementById('help-' + state.sheet.forTab);
+    if(list && el) list.scrollTop = el.offsetTop - list.offsetTop;
+  }
 }
 function renderBroadcastPopup(){
   return `
@@ -1477,6 +1489,7 @@ function renderShell(){
     <div class="topbar">
       <div class="brand">BOOMTOWN CREW</div>
       <div class="topbar-right">
+        <button class="icon-btn" data-action="open-help" data-tab="${state.tab}" aria-label="How to use">${iconHelp()}</button>
         <button class="code-chip" data-action="open-crew">${escapeHtml(state.code)}</button>
         <button class="avatar-btn" data-action="open-photo">${avatarHtml}</button>
       </div>
@@ -1509,6 +1522,7 @@ function iconLive(){return `<svg viewBox="0 0 24 24" fill="none" stroke="current
 function iconBell(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>`;}
 function iconChat(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>`;}
 function iconCamera(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>`;}
+function iconHelp(){return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 015 .5c0 1.7-2.5 2-2.5 3.5"/><line x1="12" y1="17" x2="12" y2="17.01"/></svg>`;}
 
 function renderAvatar(user, uid, sizeClass, ring){
   const name = (user && user.name) || '?';
@@ -2280,7 +2294,31 @@ function renderSheet(){
   if(state.sheet.type === 'photocompose') return overlay(stopClick(renderGalleryComposeSheet()));
   if(state.sheet.type === 'photoview') return overlay(stopClick(renderGalleryViewSheet(state.sheet.key)));
   if(state.sheet.type === 'broadcastcompose') return overlay(stopClick(renderBroadcastComposeSheet()));
+  if(state.sheet.type === 'help') return overlay(stopClick(renderHelpSheet()));
   return '';
+}
+const HELP_SECTIONS = [
+  {tab: 'lineup', title: 'Line-up', body: 'See every set at Boomtown, grouped by stage. Tap MUST or MAYBE on any act to add it to your plan — your crew sees your picks too, and picks turn up as little avatars on the act. Switch between List and Schedule (a visual timetable) with the toggle at the top, and use the search box to jump straight to an act or stage.'},
+  {tab: 'plan', title: 'My Plan', body: 'Your personal schedule of everything you’ve tagged, with a live countdown to what’s next. Flip to Crew view to see the same thing for your whole group instead of just you. Clashing sets are flagged automatically with a one-tap way to resolve them, and you can leave a note on any act or remove it from your plan.'},
+  {tab: 'heat', title: 'Heat', body: 'A leaderboard of the acts your crew is most excited for — ranked by how many MUST/MAYBE tags they’ve picked up. Good for spotting what’s secretly blowing up before you commit your day around it.'},
+  {tab: 'live', title: 'Live', body: 'Check in at a stage (with an optional photo) so your crew can see where you are right now, and tap “I’ve left” when you move on — both post automatically to the crew chat. If you turn on “Share my location”, your crew can also see a live pin for you on a map. Everything here is opt-in and stops the moment you turn it off.'},
+  {tab: 'chat', title: 'Chat', body: 'A group chat just for your crew. Type @ to bring up a list of names, or tap someone’s name chip to tag them — tagged messages are highlighted and can trigger a notification for that person. Every message is timestamped.'},
+  {tab: 'photos', title: 'Photos', body: 'A shared photo album for the whole crew — everyone sees everyone’s photos. Take one with the camera or pick from your gallery, then optionally log where it was taken (any stage, around camp, or just wandering); picking a stage pre-fills the band from whoever’s playing there right then. Filter the grid by person or place, and pick more than one of each at a time.'},
+  {tab: null, title: 'Managing your crew', body: 'Tap your crew code at the top of the screen to see everyone in your crew, edit your name or photo, or (if you created the crew) rename or remove members. From there you can also leave the crew, switch to a different one, or sign out.'}
+];
+function renderHelpSheet(){
+  const sections = HELP_SECTIONS.map(s => `
+    <div class="help-section" id="help-${s.tab||'crew'}">
+      <div class="help-section-title">${escapeHtml(s.title)}</div>
+      <div class="help-section-body">${escapeHtml(s.body)}</div>
+    </div>`).join('');
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">How to use Boomtown Crew</div>
+    <div class="help-list" id="helpList">${sections}</div>
+  </div>`;
 }
 function renderBroadcastComposeSheet(){
   return `
@@ -2719,6 +2757,8 @@ document.addEventListener('click', function(e){
       dismissBroadcast(); render(); return;
     case 'open-broadcast-compose':
       state.sheet = {type:'broadcastcompose'}; render(); return;
+    case 'open-help':
+      state.sheet = {type:'help', forTab: btn.dataset.tab}; render(); return;
     case 'send-broadcast': {
       const input = document.getElementById('broadcastInput');
       const text = input ? input.value.trim() : '';
