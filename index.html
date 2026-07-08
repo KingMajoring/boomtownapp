@@ -368,6 +368,8 @@ const DAY_LABELS = ['Wed 12','Thu 13','Fri 14','Sat 15','Sun 16'];
 const DAY_FULL = ['Wednesday 12 August','Thursday 13 August','Friday 14 August','Saturday 15 August','Sunday 16 August'];
 const FEST_DATES = ['2026-08-12','2026-08-13','2026-08-14','2026-08-15','2026-08-16'];
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 7; // was 4 - longer codes resist brute-force guessing (31^7 vs 31^4 combinations)
+const MIN_JOIN_CODE_LENGTH = 4; // old 4-char codes from before this change must still be joinable
 const GENRE_KEYWORDS = {
   'Jungle & DnB': ['jungle','dnb','d&b','drum and bass','rollers','breakbeat'],
   'Dub & Reggae': ['dub','reggae','ska','roots','soundsystem','sound system'],
@@ -441,7 +443,7 @@ function hashHue(str){
 }
 function genCode(){
   let s='';
-  for(let i=0;i<4;i++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+  for(let i=0;i<CODE_LENGTH;i++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
   return s;
 }
 function timeAgo(ts){
@@ -1350,9 +1352,9 @@ function renderJoinScreen(){
   <div class="onboard">
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     <div class="onboard-card">
-      <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="4" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
+      <input id="joinCodeInput" class="code-input" placeholder="CODE" maxlength="${CODE_LENGTH}" value="${escapeHtml(state.joinCode)}" autocomplete="off" autocapitalize="characters">
       <div class="err-text">${escapeHtml(state.joinError)}</div>
-      <button class="btn primary block" id="joinBtn" ${state.joinCode.length===4 ? '' : 'disabled'}>Join crew</button>
+      <button class="btn primary block" id="joinBtn" ${state.joinCode.length>=MIN_JOIN_CODE_LENGTH ? '' : 'disabled'}>Join crew</button>
       <button class="link-btn" data-action="back-to-choice">&larr; back</button>
     </div>
   </div>`;
@@ -2872,10 +2874,10 @@ document.addEventListener('click', function(e){
 
 document.addEventListener('input', function(e){
   if(e.target.id === 'joinCodeInput'){
-    state.joinCode = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,4);
+    state.joinCode = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,CODE_LENGTH);
     e.target.value = state.joinCode;
     const btn = document.getElementById('joinBtn');
-    if(btn) btn.disabled = state.joinCode.length !== 4;
+    if(btn) btn.disabled = state.joinCode.length < MIN_JOIN_CODE_LENGTH;
     return;
   }
   if(e.target.id === 'chatInput'){
@@ -3008,7 +3010,7 @@ document.addEventListener('click', function(e){
 
 document.addEventListener('keydown', function(e){
   if(e.key === 'Enter'){
-    if(e.target.id === 'joinCodeInput' && state.joinCode.length===4){
+    if(e.target.id === 'joinCodeInput' && state.joinCode.length>=MIN_JOIN_CODE_LENGTH){
       doJoinCrew();
     }
     if(e.target.id === 'chatInput' && e.target.value.trim()){
