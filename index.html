@@ -329,6 +329,11 @@ const FB_READY = !!(FIREBASE_CONFIG.apiKey && typeof FIREBASE_CONFIG.apiKey === 
 const GOOGLE_MAPS_API_KEY = "AIzaSyAqSVXy4bA-TJe49l-m8YoZZc-XYaKe5ag";
 const MAPS_READY = !!(GOOGLE_MAPS_API_KEY && !GOOGLE_MAPS_API_KEY.startsWith('PASTE_'));
 
+/* App admins (can send announcements to everyone). Add more UIDs here
+   if needed - the same UIDs must also be added to the "broadcast" write
+   rule in Firebase (see the rules block in project notes). */
+const ADMIN_UIDS = new Set(['j0lF2eADeOT5IZlySMLrw1yPej72']);
+
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
@@ -692,10 +697,7 @@ function dismissBroadcast(){
     .catch(err => console.error('Failed to mark announcement seen:', err));
 }
 function checkAdmin(){
-  db.ref(`admins/${state.userId}`).once('value').then(snap => {
-    const admin = snap.val() === true;
-    if(admin !== state.isAdmin){ state.isAdmin = admin; render(); }
-  }).catch(() => { /* not an admin - rules deny the read */ });
+  state.isAdmin = ADMIN_UIDS.has(state.userId);
 }
 function sendBroadcast(text){
   const trimmed = (text||'').trim();
