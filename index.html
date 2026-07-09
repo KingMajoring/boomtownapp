@@ -248,6 +248,9 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .gallery-cell{padding:0;border:none;background:var(--card2);border-radius:8px;overflow:hidden;aspect-ratio:1;position:relative;}
 .gallery-cell img{width:100%;height:100%;object-fit:cover;display:block;}
 .gallery-cell-name{position:absolute;left:0;right:0;bottom:0;padding:10px 6px 4px;font-size:10.5px;font-weight:600;color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.65));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.gallery-cell-status{position:absolute;top:0;left:0;right:0;padding:4px 6px;font-size:10px;font-weight:600;color:#fff;text-align:center;background:rgba(0,0,0,.55);}
+.gallery-cell-status.failed{background:var(--red);}
+.offline-banner{background:var(--red);color:#fff;text-align:center;font-size:12.5px;font-weight:600;padding:9px 12px;border-radius:10px;margin-bottom:12px;}
 .gallery-filters{margin-bottom:12px;display:flex;flex-direction:column;gap:6px;}
 .chip-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
 
@@ -275,6 +278,10 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .chat-time-inline{color:var(--text-dim2);font-size:11px;}
 .chat-time{font-size:10.5px;color:var(--text-dim2);margin-top:3px;text-align:right;}
 .chat-msg.me .chat-time{color:#4a3416;}
+.chat-status{font-size:10.5px;margin-top:3px;text-align:right;color:var(--text-dim2);}
+.chat-status.failed{color:var(--red);}
+.chat-msg.me .chat-status{color:#4a3416;}
+.chat-msg.me .chat-status.failed{color:var(--red);}
 .chat-photo img{max-width:160px;border-radius:10px;margin-top:6px;display:block;}
 .chat-composer{display:flex;flex-direction:column;gap:8px;margin-top:10px;}
 .chat-tagbar{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
@@ -354,6 +361,16 @@ let db = null;
 if (FB_READY) {
   firebase.initializeApp(FIREBASE_CONFIG);
   db = firebase.database();
+}
+function attachConnectionListener(){
+  if(!FB_READY) return;
+  db.ref('.info/connected').on('value', snap => {
+    const online = snap.val() === true;
+    if(online !== state.isOnline){
+      state.isOnline = online;
+      render();
+    }
+  });
 }
 
 /* =====================================================================
@@ -578,6 +595,7 @@ const state = {
   isAdmin: false,
   broadcastMsg: null,        // unseen announcement {id,text} pending "Got it"
   seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
+  isOnline: true,
 };
 
 function loadIdentity(){
@@ -840,6 +858,13 @@ function attachChatListener(){
   const seenKeys = new Set();
   chatRef.on('value', snap => {
     const val = snap.val() || {};
+    // keep any locally in-flight (pending/failed) messages that the server
+    // snapshot doesn't know about yet, so a slow/offline send doesn't
+    // flicker out of the thread the moment someone else's message arrives
+    Object.keys(state.chatMessages || {}).forEach(k => {
+      const existing = state.chatMessages[k];
+      if(existing && (existing.pending || existing.failed) && !val[k]) val[k] = existing;
+    });
     state.chatMessages = val;
     if(!initialized){
       Object.keys(val).forEach(k => seenKeys.add(k));
@@ -880,19 +905,38 @@ function sendChatMessage(text, opts){
   opts = opts || {};
   const trimmed = (text||'').trim();
   if(!trimmed) return;
-  const key = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+  const key = opts.retryKey || ('m' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+  const existingAt = opts.retryKey && state.chatMessages[key] ? state.chatMessages[key].at : null;
   const msg = {
     uid: state.userId,
     name: state.name,
     text: trimmed,
     mentions: opts.mentions || parseMentions(trimmed),
     system: !!opts.system,
-    at: Date.now()
+    at: existingAt || Date.now(),
+    pending: true
   };
   if(opts.photo) msg.photo = opts.photo;
   state.chatMessages = Object.assign({}, state.chatMessages, {[key]: msg});
-  db.ref(`crews/${state.code}/chat/${key}`).set(Object.assign({}, msg, {at: firebase.database.ServerValue.TIMESTAMP}))
-    .catch(err => console.error('Failed to send chat message:', err));
+  render();
+  const toSend = Object.assign({}, msg, {at: existingAt ? existingAt : firebase.database.ServerValue.TIMESTAMP});
+  delete toSend.pending;
+  db.ref(`crews/${state.code}/chat/${key}`).set(toSend)
+    .then(() => {
+      if(!state.chatMessages[key]) return;
+      const cleared = Object.assign({}, state.chatMessages[key]);
+      delete cleared.pending; delete cleared.failed;
+      state.chatMessages = Object.assign({}, state.chatMessages, {[key]: cleared});
+      render();
+    })
+    .catch(err => {
+      console.error('Failed to send chat message:', err);
+      if(!state.chatMessages[key]) return;
+      const failed = Object.assign({}, state.chatMessages[key], {failed: true});
+      delete failed.pending;
+      state.chatMessages = Object.assign({}, state.chatMessages, {[key]: failed});
+      render();
+    });
 }
 let galleryRef = null;
 function attachGalleryListener(){
@@ -900,7 +944,14 @@ function attachGalleryListener(){
   if(galleryRef) galleryRef.off();
   galleryRef = db.ref(`crews/${state.code}/gallery`);
   galleryRef.on('value', snap => {
-    state.galleryPhotos = snap.val() || {};
+    const val = snap.val() || {};
+    // same fix as chat: don't let a slow/offline upload disappear from the
+    // grid just because someone else's photo synced in first
+    Object.keys(state.galleryPhotos || {}).forEach(k => {
+      const existing = state.galleryPhotos[k];
+      if(existing && (existing.pending || existing.failed) && !val[k]) val[k] = existing;
+    });
+    state.galleryPhotos = val;
     render();
   });
 }
@@ -908,27 +959,45 @@ function saveGalleryPhoto(){
   if(!FB_READY || !state.code || !state.galleryTemp) return;
   const key = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
   const loc = state.galleryLocPick;
-  const fullPhoto = state.galleryTemp;
   const entry = {
     uid: state.userId,
     name: state.name,
-    thumb: state.galleryTempThumb || fullPhoto,
+    thumb: state.galleryTempThumb || state.galleryTemp,
     stage: loc.startsWith('s:') ? parseInt(loc.slice(2),10) : null,
     place: (loc==='camp'||loc==='wandering') ? loc : null,
     act: state.galleryActPick !== '' ? parseInt(state.galleryActPick,10) : null,
     at: Date.now()
   };
-  state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: entry});
-  state.galleryFullCache = Object.assign({}, state.galleryFullCache, {[key]: fullPhoto});
-  db.ref(`crews/${state.code}/gallery/${key}`).set(Object.assign({}, entry, {at: firebase.database.ServerValue.TIMESTAMP}))
-    .catch(err => console.error('Failed to save gallery photo:', err));
-  db.ref(`crews/${state.code}/galleryFull/${key}`).set({photo: fullPhoto})
-    .catch(err => console.error('Failed to save full-size photo:', err));
+  saveOrRetryGalleryPhoto(key, entry, state.galleryTemp);
   state.galleryTemp = null;
   state.galleryTempThumb = null;
   state.galleryLocPick = '';
   state.galleryActPick = '';
   state.sheet = null;
+}
+function saveOrRetryGalleryPhoto(key, entry, fullPhoto){
+  const pendingEntry = Object.assign({}, entry, {pending: true});
+  delete pendingEntry.failed;
+  state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: pendingEntry});
+  state.galleryFullCache = Object.assign({}, state.galleryFullCache, {[key]: fullPhoto});
+  render();
+  Promise.all([
+    db.ref(`crews/${state.code}/gallery/${key}`).set(Object.assign({}, entry, {at: firebase.database.ServerValue.TIMESTAMP})),
+    db.ref(`crews/${state.code}/galleryFull/${key}`).set({photo: fullPhoto})
+  ]).then(() => {
+    if(!state.galleryPhotos[key]) return;
+    const cleared = Object.assign({}, state.galleryPhotos[key]);
+    delete cleared.pending; delete cleared.failed;
+    state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: cleared});
+    render();
+  }).catch(err => {
+    console.error('Failed to save gallery photo:', err);
+    if(!state.galleryPhotos[key]) return;
+    const failed = Object.assign({}, state.galleryPhotos[key], {failed: true});
+    delete failed.pending;
+    state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: failed});
+    render();
+  });
 }
 function deleteGalleryPhoto(key){
   if(!FB_READY || !state.code) return;
@@ -1519,6 +1588,9 @@ function applyGenreQuiz(){
 /* ---------------------------------------------------------------------
    Shell (topbar + tab content + bottomnav)
    --------------------------------------------------------------------- */
+function renderOfflineBanner(){
+  return `<div class="offline-banner">You're offline — chat, photos and check-ins won't send until you're back online</div>`;
+}
 function renderShell(){
   const me = myUser();
   const avatarHtml = renderAvatar(me, state.userId, 'sm2');
@@ -1534,6 +1606,7 @@ function renderShell(){
     </div>
     <main>
       <div class="view">
+        ${!state.isOnline ? renderOfflineBanner() : ''}
         ${renderTab()}
       </div>
     </main>
@@ -2149,8 +2222,11 @@ function renderChatMessage(msg){
   const isMe = msg.uid === state.userId;
   const photoHtml = msg.photo ? `<div class="chat-photo"><img src="${msg.photo}"></div>` : '';
   const timeHtml = `<div class="chat-time">${escapeHtml(formatClockTime(msg.at))}</div>`;
+  const statusHtml = msg.failed
+    ? `<div class="chat-status failed">Not sent <button class="link-btn" style="padding:0 0 0 4px;" data-action="retry-chat-message" data-key="${msg.key}">Retry</button></div>`
+    : (msg.pending ? `<div class="chat-status">Sending&hellip;</div>` : '');
   if(msg.system){
-    return `<div class="chat-system">${renderChatText(msg.text)} <span class="chat-time-inline">${escapeHtml(formatClockTime(msg.at))}</span>${photoHtml}</div>`;
+    return `<div class="chat-system">${renderChatText(msg.text)} <span class="chat-time-inline">${escapeHtml(formatClockTime(msg.at))}</span>${photoHtml}${statusHtml}</div>`;
   }
   return `
   <div class="chat-msg ${isMe?'me':''}">
@@ -2159,6 +2235,7 @@ function renderChatMessage(msg){
       <div class="chat-text">${renderChatText(msg.text)}</div>
       ${photoHtml}
       ${timeHtml}
+      ${statusHtml}
     </div>
   </div>`;
 }
@@ -2234,11 +2311,15 @@ function renderPhotosTab(){
   });
   const cells = keys.map(k => {
     const p = state.galleryPhotos[k];
+    const statusBadge = p.failed
+      ? `<div class="gallery-cell-status failed">Not sent <button class="link-btn" style="padding:0 0 0 4px;color:#fff;" data-action="retry-gallery-photo" data-key="${k}">Retry</button></div>`
+      : (p.pending ? `<div class="gallery-cell-status">Sending&hellip;</div>` : '');
     return `
-    <button class="gallery-cell" data-action="open-gallery-photo" data-key="${k}">
+    <div class="gallery-cell" data-action="open-gallery-photo" data-key="${k}">
       <img src="${p.thumb || p.photo}" alt="" loading="lazy">
       <span class="gallery-cell-name">${escapeHtml(galleryPhotographerName(p))}</span>
-    </button>`;
+      ${statusBadge}
+    </div>`;
   }).join('');
 
   return `
@@ -2819,6 +2900,23 @@ document.addEventListener('click', function(e){
         render();
       }
       return;
+    case 'retry-gallery-photo': {
+      const key = btn.dataset.key;
+      const p = state.galleryPhotos[key];
+      const full = state.galleryFullCache[key];
+      if(p && full){
+        saveOrRetryGalleryPhoto(key, {uid: p.uid, name: p.name, thumb: p.thumb, stage: p.stage, place: p.place, act: p.act, at: p.at}, full);
+      }
+      return;
+    }
+    case 'retry-chat-message': {
+      const key = btn.dataset.key;
+      const msg = state.chatMessages[key];
+      if(msg){
+        sendChatMessage(msg.text, {retryKey: key, mentions: msg.mentions, system: msg.system, photo: msg.photo});
+      }
+      return;
+    }
     case 'start-sharing-location':
       startSharingLocation(); render(); return;
     case 'stop-sharing-location':
@@ -3026,6 +3124,7 @@ document.addEventListener('keydown', function(e){
    --------------------------------------------------------------------- */
 loadIdentity();
 if(FB_READY){
+  attachConnectionListener();
   firebase.auth().onAuthStateChanged(user => {
     state.authReady = true;
     if(user){
