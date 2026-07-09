@@ -262,7 +262,6 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .gallery-preview img{width:100%;max-height:300px;object-fit:contain;border-radius:12px;background:var(--card2);}
 .gallery-view{position:relative;}
 .gallery-view img{width:100%;max-height:60vh;object-fit:contain;border-radius:12px;background:var(--card2);filter:blur(0);}
-.gallery-view-loading{position:absolute;left:0;right:0;bottom:8px;text-align:center;font-size:12px;color:var(--text-dim);background:rgba(0,0,0,.5);padding:4px;border-radius:8px;margin:0 8px;}
 
 /* chat */
 .chat-thread{max-height:65vh;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:8px;}
@@ -317,6 +316,7 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
 <script>
 /* =====================================================================
    FIREBASE CONFIG
@@ -358,9 +358,19 @@ window.addEventListener('beforeinstallprompt', (e) => {
 });
 
 let db = null;
+let storage = null;
 if (FB_READY) {
   firebase.initializeApp(FIREBASE_CONFIG);
   db = firebase.database();
+  storage = firebase.storage();
+}
+function dataUrlToBlob(dataUrl){
+  const [header, base64] = dataUrl.split(',');
+  const mime = /data:(.*?);base64/.exec(header)[1];
+  const bytes = atob(base64);
+  const arr = new Uint8Array(bytes.length);
+  for(let i=0;i<bytes.length;i++) arr[i] = bytes.charCodeAt(i);
+  return new Blob([arr], {type: mime});
 }
 function attachConnectionListener(){
   if(!FB_READY) return;
@@ -583,11 +593,9 @@ const state = {
   liveView: 'list',      // 'list' | 'map'
   sharingLocation: false,
   locationError: null,
-  galleryPhotos: {},     // live from firebase: { key: {uid,name,photo,stage,place,act,at} }
+  galleryPhotos: {},     // live from firebase: { key: {uid,name,thumbUrl,fullUrl,storagePath,stage,place,act,at} }
   galleryTemp: null,     // staged full-res data URL awaiting save
   galleryTempThumb: null,
-  galleryFullCache: {},  // key -> full-res data URL, fetched on demand
-  galleryFullLoading: null,
   galleryLocPick: '',    // '' | 'camp' | 'wandering' | 's:<stageIdx>'
   galleryActPick: '',
   galleryFilterUids: new Set(),
@@ -678,8 +686,6 @@ function detachListeners(){
   if(galleryRef){ galleryRef.off(); galleryRef = null; }
   state.chatMessages = {};
   state.galleryPhotos = {};
-  state.galleryFullCache = {};
-  state.galleryFullLoading = null;
   clearGeoWatch();
   crewMapInstance = null;
   crewMapMarkers = {};
@@ -800,8 +806,6 @@ function switchToCrew(code){
   state.groupOwner = null;
   state.chatMessages = {};
   state.galleryPhotos = {};
-  state.galleryFullCache = {};
-  state.galleryFullLoading = null;
   state.galleryFilterUids = new Set();
   state.galleryFilterLocs = new Set();
   state.crewEntered = true;
@@ -960,32 +964,36 @@ function saveGalleryPhoto(){
   if(!FB_READY || !state.code || !state.galleryTemp) return;
   const key = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
   const loc = state.galleryLocPick;
-  const entry = {
+  const meta = {
     uid: state.userId,
     name: state.name,
-    thumb: state.galleryTempThumb || state.galleryTemp,
     stage: loc.startsWith('s:') ? parseInt(loc.slice(2),10) : null,
     place: (loc==='camp'||loc==='wandering') ? loc : null,
     act: state.galleryActPick !== '' ? parseInt(state.galleryActPick,10) : null,
     at: Date.now()
   };
-  saveOrRetryGalleryPhoto(key, entry, state.galleryTemp);
+  saveOrRetryGalleryPhoto(key, meta, state.galleryTempThumb || state.galleryTemp, state.galleryTemp);
   state.galleryTemp = null;
   state.galleryTempThumb = null;
   state.galleryLocPick = '';
   state.galleryActPick = '';
   state.sheet = null;
 }
-function saveOrRetryGalleryPhoto(key, entry, fullPhoto){
-  const pendingEntry = Object.assign({}, entry, {pending: true});
+function saveOrRetryGalleryPhoto(key, meta, thumbDataUrl, fullDataUrl){
+  const pendingEntry = Object.assign({}, meta, {pending: true, localThumb: thumbDataUrl, localFull: fullDataUrl});
   delete pendingEntry.failed;
   state.galleryPhotos = Object.assign({}, state.galleryPhotos, {[key]: pendingEntry});
-  state.galleryFullCache = Object.assign({}, state.galleryFullCache, {[key]: fullPhoto});
   render();
+  const storagePath = `crews/${state.code}/gallery/${key}`;
   Promise.all([
-    db.ref(`crews/${state.code}/gallery/${key}`).set(Object.assign({}, entry, {at: firebase.database.ServerValue.TIMESTAMP})),
-    db.ref(`crews/${state.code}/galleryFull/${key}`).set({photo: fullPhoto})
-  ]).then(() => {
+    storage.ref(`${storagePath}/thumb.jpg`).put(dataUrlToBlob(thumbDataUrl), {contentType:'image/jpeg'}).then(s => s.ref.getDownloadURL()),
+    storage.ref(`${storagePath}/full.jpg`).put(dataUrlToBlob(fullDataUrl), {contentType:'image/jpeg'}).then(s => s.ref.getDownloadURL())
+  ]).then(([thumbUrl, fullUrl]) => {
+    return db.ref(`crews/${state.code}/gallery/${key}`).set(Object.assign({}, meta, {
+      thumbUrl, fullUrl, storagePath,
+      at: firebase.database.ServerValue.TIMESTAMP
+    }));
+  }).then(() => {
     if(!state.galleryPhotos[key]) return;
     const cleared = Object.assign({}, state.galleryPhotos[key]);
     delete cleared.pending; delete cleared.failed;
@@ -1004,27 +1012,13 @@ function deleteGalleryPhoto(key){
   if(!FB_READY || !state.code) return;
   state.galleryPhotos = Object.assign({}, state.galleryPhotos);
   delete state.galleryPhotos[key];
-  state.galleryFullCache = Object.assign({}, state.galleryFullCache);
-  delete state.galleryFullCache[key];
+  const storagePath = `crews/${state.code}/gallery/${key}`;
   db.ref(`crews/${state.code}/gallery/${key}`).remove()
     .catch(err => console.error('Failed to delete gallery photo:', err));
-  db.ref(`crews/${state.code}/galleryFull/${key}`).remove()
-    .catch(err => console.error('Failed to delete full-size photo:', err));
-}
-function loadGalleryFullPhoto(key){
-  if(!FB_READY || !state.code || state.galleryFullCache[key] || state.galleryFullLoading === key) return;
-  state.galleryFullLoading = key;
-  db.ref(`crews/${state.code}/galleryFull/${key}`).once('value').then(snap => {
-    const val = snap.val();
-    if(val && val.photo){
-      state.galleryFullCache = Object.assign({}, state.galleryFullCache, {[key]: val.photo});
-    }
-    state.galleryFullLoading = null;
-    render();
-  }).catch(err => {
-    console.error('Failed to load full-size photo:', err);
-    state.galleryFullLoading = null;
-  });
+  storage.ref(`${storagePath}/thumb.jpg`).delete()
+    .catch(err => console.error('Failed to delete thumbnail from storage:', err));
+  storage.ref(`${storagePath}/full.jpg`).delete()
+    .catch(err => console.error('Failed to delete full photo from storage:', err));
 }
 function galleryLocationLabel(p){
   if(p.stage != null && STAGES[p.stage]) return STAGES[p.stage];
@@ -1306,9 +1300,6 @@ function render(){
     const list = document.getElementById('helpList');
     const el = document.getElementById('help-' + state.sheet.forTab);
     if(list && el) list.scrollTop = el.offsetTop - list.offsetTop;
-  }
-  if(isShell && state.sheet && state.sheet.type === 'photoview'){
-    loadGalleryFullPhoto(state.sheet.key);
   }
 }
 function renderBroadcastPopup(){
@@ -2355,7 +2346,7 @@ function renderPhotosTab(){
       : (p.pending ? `<div class="gallery-cell-status">Sending&hellip;</div>` : '');
     return `
     <div class="gallery-cell" data-action="open-gallery-photo" data-key="${k}">
-      <img src="${p.thumb || p.photo}" alt="" loading="lazy">
+      <img src="${p.thumbUrl || p.localThumb}" alt="" loading="lazy">
       <span class="gallery-cell-name">${escapeHtml(galleryPhotographerName(p))}</span>
       ${statusBadge}
     </div>`;
@@ -2423,13 +2414,12 @@ function renderGalleryViewSheet(key){
   const locLabel = galleryLocationLabel(p);
   const actLabel = (p.act != null && ACTS[p.act]) ? ACTS[p.act][4] : null;
   const canDelete = p.uid === state.userId || isCrewOwner();
-  const bigSrc = state.galleryFullCache[key] || p.thumb || p.photo;
-  const loading = !state.galleryFullCache[key] && !p.photo;
+  const bigSrc = p.fullUrl || p.localFull || p.thumbUrl || p.localThumb;
   return `
   <div class="sheet sheet-rel">
     <button class="close-x" data-action="close-sheet">&times;</button>
     <div class="sheet-handle"></div>
-    <div class="gallery-view"><img src="${bigSrc}" alt="">${loading ? '<div class="gallery-view-loading">Loading full photo&hellip;</div>' : ''}</div>
+    <div class="gallery-view"><img src="${bigSrc}" alt=""></div>
     <div class="sheet-title" style="margin-top:10px;">${escapeHtml(p.name||'?')}</div>
     <div class="sheet-sub">
       ${actLabel ? escapeHtml(actLabel)+' &middot; ' : ''}${locLabel ? escapeHtml(locLabel)+' &middot; ' : ''}${escapeHtml(formatClockTime(p.at))}
@@ -2992,9 +2982,8 @@ document.addEventListener('click', function(e){
     case 'retry-gallery-photo': {
       const key = btn.dataset.key;
       const p = state.galleryPhotos[key];
-      const full = state.galleryFullCache[key];
-      if(p && full){
-        saveOrRetryGalleryPhoto(key, {uid: p.uid, name: p.name, thumb: p.thumb, stage: p.stage, place: p.place, act: p.act, at: p.at}, full);
+      if(p && p.localFull){
+        saveOrRetryGalleryPhoto(key, {uid: p.uid, name: p.name, stage: p.stage, place: p.place, act: p.act, at: p.at}, p.localThumb, p.localFull);
       }
       return;
     }
