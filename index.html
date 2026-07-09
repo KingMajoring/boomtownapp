@@ -596,6 +596,7 @@ const state = {
   broadcastMsg: null,        // unseen announcement {id,text} pending "Got it"
   seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
   isOnline: true,
+  pendingJoinCode: null,   // set from a shared ?join=CODE link, consumed right after sign-in
 };
 
 function loadIdentity(){
@@ -1329,6 +1330,7 @@ function renderSignIn(){
     <div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>
     ${renderCountdownBanner()}
     <div class="onboard-card">
+      ${state.pendingJoinCode ? `<p style="color:var(--gold);font-size:13.5px;margin:0 0 4px;">You've been invited to a crew — sign in and you'll join it automatically.</p>` : ''}
       <button class="btn primary block" data-action="sign-in-google" style="display:flex;align-items:center;justify-content:center;gap:10px;">${iconGoogle()}Sign in with Google</button>
       ${state.authError ? `<div class="err-text">${escapeHtml(state.authError)}</div>` : ''}
       ${renderInstallHelper()}
@@ -1512,11 +1514,17 @@ function doStartCrew(){
   render();
 }
 function doJoinCrew(){
-  const code = state.joinCode.toUpperCase();
+  joinCrewByCode(state.joinCode.toUpperCase());
+}
+function joinCrewByCode(code, opts){
+  opts = opts || {};
+  const fail = (message) => {
+    state.joinError = message;
+    if(opts.onFail) opts.onFail(); else render();
+  };
   db.ref(`crews/${code}/group`).once('value').then(snap => {
     if(!snap.exists()){
-      state.joinError = 'Crew not found — check the code.';
-      render();
+      fail('Crew not found — check the code.');
       return;
     }
     state.code = code;
@@ -1541,12 +1549,43 @@ function doJoinCrew(){
       }
       attachListener();
       render();
-    }).catch(err => console.error('Failed to check membership:', err));
+    }).catch(err => { console.error('Failed to check membership:', err); fail('Something went wrong — try again.'); });
   }).catch((err)=>{
     console.error('Failed to join crew:', err);
-    state.joinError = 'Something went wrong — try again.';
-    render();
+    fail('Something went wrong — try again.');
   });
+}
+function autoJoinFromLink(code){
+  joinCrewByCode(code, {
+    onFail: () => {
+      // bad/stale invite link - fall back to the normal onboarding flow with
+      // the code pre-filled and the error visible, instead of getting stuck
+      state.joinCode = code;
+      state.onboardStep = 'join';
+      state.myCrewsLoaded = true;
+      render();
+      loadMyCrews();
+    }
+  });
+}
+function buildAppShareUrl(){
+  return window.location.origin + window.location.pathname;
+}
+function buildCrewShareUrl(){
+  return buildAppShareUrl() + '?join=' + encodeURIComponent(state.code);
+}
+function consumePendingJoinCodeFromUrl(){
+  try{
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('join');
+    if(raw){
+      const cleaned = raw.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0, CODE_LENGTH);
+      if(cleaned.length >= MIN_JOIN_CODE_LENGTH) state.pendingJoinCode = cleaned;
+      params.delete('join');
+      const query = params.toString();
+      window.history.replaceState(null, '', window.location.pathname + (query ? '?'+query : '') + window.location.hash);
+    }
+  }catch(e){ console.error('Failed to parse invite link:', e); }
 }
 function renderGenreQuiz(){
   const selected = state.genreSelections;
@@ -2408,6 +2447,7 @@ function renderSheet(){
   if(state.sheet.type === 'detail') return overlay(stopClick(renderDetailSheet(state.sheet.actIdx)));
   if(state.sheet.type === 'clash') return overlay(stopClick(renderClashSheet(state.sheet.actIdxs)));
   if(state.sheet.type === 'crew') return overlay(stopClick(renderCrewSheet()));
+  if(state.sheet.type === 'share') return overlay(stopClick(renderShareSheet()));
   if(state.sheet.type === 'photo') return overlay(stopClick(renderPhotoSheet()));
   if(state.sheet.type === 'note') return overlay(stopClick(renderNoteSheet(state.sheet.actIdx)));
   if(state.sheet.type === 'bingo') return overlay(stopClick(renderBingoSheet()));
@@ -2541,7 +2581,7 @@ function renderCrewSheet(){
     <div class="sheet-handle"></div>
     <div class="sheet-title">Your crew</div>
     <div class="crew-code-big">${escapeHtml(state.code)}</div>
-    <button class="btn block" data-action="copy-code" style="margin-bottom:16px;">Copy code to share</button>
+    <button class="btn block" data-action="open-share" style="margin-bottom:16px;">Invite friends</button>
     ${rows}
     <div style="height:16px"></div>
     <button class="btn block" data-action="open-photo">Edit my profile photo</button>
@@ -2554,6 +2594,26 @@ function renderCrewSheet(){
     <button class="btn block danger" data-action="leave-crew">Leave crew</button>
     <div style="height:8px"></div>
     <button class="btn block ghost" data-action="sign-out">Sign out</button>
+  </div>`;
+}
+function renderShareSheet(){
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">Invite friends</div>
+    <button class="big-btn primary" data-action="share-crew-link">
+      <strong>Share my crew</strong>
+      <span>Sends a link that joins them to this crew automatically when they sign in</span>
+    </button>
+    <div style="height:10px"></div>
+    <button class="big-btn" data-action="share-app-link">
+      <strong>Share the app</strong>
+      <span>Just the app &mdash; they can create or join a crew themselves</span>
+    </button>
+    <div style="height:16px"></div>
+    <div class="crew-code-big">${escapeHtml(state.code)}</div>
+    <button class="btn block" data-action="copy-code">Copy code to share</button>
   </div>`;
 }
 function renderPhotoSheet(){
@@ -2802,7 +2862,36 @@ document.addEventListener('click', function(e){
     case 'copy-code': {
       if(navigator.clipboard) navigator.clipboard.writeText(state.code).catch(()=>{});
       btn.textContent = 'Copied!';
-      setTimeout(()=>{ if(state.sheet && state.sheet.type==='crew') render(); }, 900);
+      setTimeout(()=>{ if(state.sheet && (state.sheet.type==='crew' || state.sheet.type==='share')) render(); }, 900);
+      return;
+    }
+    case 'open-share':
+      state.sheet = {type:'share'}; render(); return;
+    case 'share-crew-link': {
+      const url = buildCrewShareUrl();
+      const text = "Join my Boomtown Crew!";
+      if(navigator.share){
+        navigator.share({title:'Join my Boomtown crew', text, url}).catch(()=>{});
+      } else if(navigator.clipboard){
+        navigator.clipboard.writeText(`${text} ${url}`).then(()=>{
+          const label = btn.textContent;
+          btn.innerHTML = '<strong>Copied!</strong>';
+          setTimeout(()=>{ if(state.sheet && state.sheet.type==='share') render(); }, 1200);
+        }).catch(()=>{});
+      }
+      return;
+    }
+    case 'share-app-link': {
+      const url = buildAppShareUrl();
+      const text = 'Check out Boomtown Crew — a companion app for Boomtown 2026';
+      if(navigator.share){
+        navigator.share({title:'Boomtown Crew', text, url}).catch(()=>{});
+      } else if(navigator.clipboard){
+        navigator.clipboard.writeText(`${text} ${url}`).then(()=>{
+          btn.innerHTML = '<strong>Copied!</strong>';
+          setTimeout(()=>{ if(state.sheet && state.sheet.type==='share') render(); }, 1200);
+        }).catch(()=>{});
+      }
       return;
     }
     case 'leave-crew': {
@@ -3123,6 +3212,7 @@ document.addEventListener('keydown', function(e){
    Boot
    --------------------------------------------------------------------- */
 loadIdentity();
+consumePendingJoinCodeFromUrl();
 if(FB_READY){
   attachConnectionListener();
   firebase.auth().onAuthStateChanged(user => {
@@ -3132,12 +3222,18 @@ if(FB_READY){
       if(!state.name) state.name = user.displayName || 'Friend';
       ensureProfile();
       state.myCrewsLoaded = false;
-      // if this device remembers a crew code from before this account's crew list was
-      // indexed, backfill it into the index first so loadMyCrews() can see it below
-      const backfill = state.code
-        ? db.ref(`profiles/${user.uid}/crews/${state.code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP}).catch(err => console.error('Failed to backfill crew index:', err))
-        : Promise.resolve();
-      backfill.then(() => loadMyCrews());
+      if(state.pendingJoinCode){
+        const codeToJoin = state.pendingJoinCode;
+        state.pendingJoinCode = null;
+        autoJoinFromLink(codeToJoin);
+      } else {
+        // if this device remembers a crew code from before this account's crew list was
+        // indexed, backfill it into the index first so loadMyCrews() can see it below
+        const backfill = state.code
+          ? db.ref(`profiles/${user.uid}/crews/${state.code}`).update({joinedAt: firebase.database.ServerValue.TIMESTAMP}).catch(err => console.error('Failed to backfill crew index:', err))
+          : Promise.resolve();
+        backfill.then(() => loadMyCrews());
+      }
     } else {
       detachListeners();
       state.userId = null;
