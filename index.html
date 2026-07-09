@@ -251,6 +251,7 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .gallery-cell-status{position:absolute;top:0;left:0;right:0;padding:4px 6px;font-size:10px;font-weight:600;color:#fff;text-align:center;background:rgba(0,0,0,.55);}
 .gallery-cell-status.failed{background:var(--red);}
 .offline-banner{background:var(--red);color:#fff;text-align:center;font-size:12.5px;font-weight:600;padding:9px 12px;border-radius:10px;margin-bottom:12px;}
+.toast{position:fixed;left:50%;bottom:calc(var(--nav-h) + env(safe-area-inset-bottom) + 14px);transform:translateX(-50%);max-width:calc(100% - 32px);background:var(--red);color:#fff;font-size:13px;font-weight:600;text-align:center;padding:10px 16px;border-radius:10px;z-index:70;box-shadow:0 4px 14px rgba(0,0,0,.35);}
 .gallery-filters{margin-bottom:12px;display:flex;flex-direction:column;gap:6px;}
 .chip-row{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
 
@@ -371,6 +372,17 @@ function dataUrlToBlob(dataUrl){
   const arr = new Uint8Array(bytes.length);
   for(let i=0;i<bytes.length;i++) arr[i] = bytes.charCodeAt(i);
   return new Blob([arr], {type: mime});
+}
+function showToast(msg){
+  const id = Date.now() + Math.random();
+  state.toast = {msg, id};
+  render();
+  setTimeout(() => {
+    if(state.toast && state.toast.id === id){
+      state.toast = null;
+      render();
+    }
+  }, 4000);
 }
 function attachConnectionListener(){
   if(!FB_READY) return;
@@ -605,6 +617,7 @@ const state = {
   seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
   isOnline: true,
   pendingJoinCode: null,   // set from a shared ?join=CODE link, consumed right after sign-in
+  toast: null,             // transient error banner: {msg, id}
 };
 
 function loadIdentity(){
@@ -1001,6 +1014,7 @@ function saveOrRetryGalleryPhoto(key, meta, thumbDataUrl, fullDataUrl){
     render();
   }).catch(err => {
     console.error('Failed to save gallery photo:', err);
+    showToast("Couldn't upload that photo — check your connection and try again");
     if(!state.galleryPhotos[key]) return;
     const failed = Object.assign({}, state.galleryPhotos[key], {failed: true});
     delete failed.pending;
@@ -1010,15 +1024,18 @@ function saveOrRetryGalleryPhoto(key, meta, thumbDataUrl, fullDataUrl){
 }
 function deleteGalleryPhoto(key){
   if(!FB_READY || !state.code) return;
+  const p = state.galleryPhotos[key];
   state.galleryPhotos = Object.assign({}, state.galleryPhotos);
   delete state.galleryPhotos[key];
-  const storagePath = `crews/${state.code}/gallery/${key}`;
   db.ref(`crews/${state.code}/gallery/${key}`).remove()
     .catch(err => console.error('Failed to delete gallery photo:', err));
-  storage.ref(`${storagePath}/thumb.jpg`).delete()
-    .catch(err => console.error('Failed to delete thumbnail from storage:', err));
-  storage.ref(`${storagePath}/full.jpg`).delete()
-    .catch(err => console.error('Failed to delete full photo from storage:', err));
+  const storagePath = p && p.storagePath;
+  if(storagePath){
+    storage.ref(`${storagePath}/thumb.jpg`).delete()
+      .catch(err => console.error('Failed to delete thumbnail from storage:', err));
+    storage.ref(`${storagePath}/full.jpg`).delete()
+      .catch(err => console.error('Failed to delete full photo from storage:', err));
+  }
 }
 function galleryLocationLabel(p){
   if(p.stage != null && STAGES[p.stage]) return STAGES[p.stage];
@@ -1649,6 +1666,7 @@ function renderShell(){
       ${navBtn('photos','Photos', iconCamera(), clashCount, false)}
     </div>
     ${renderSheet()}
+    ${state.toast ? `<div class="toast">${escapeHtml(state.toast.msg)}</div>` : ''}
   `;
 }
 function navBtn(key,label,svg,clashCount,showBadge){
