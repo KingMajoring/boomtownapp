@@ -1027,14 +1027,22 @@ function deleteGalleryPhoto(key){
   const p = state.galleryPhotos[key];
   state.galleryPhotos = Object.assign({}, state.galleryPhotos);
   delete state.galleryPhotos[key];
+  let toastShown = false;
+  const onDeleteFail = (err, label) => {
+    console.error(`Failed to delete ${label}:`, err);
+    if(!toastShown){
+      toastShown = true;
+      showToast("Couldn't fully delete that photo — it may still show up for others");
+    }
+  };
   db.ref(`crews/${state.code}/gallery/${key}`).remove()
-    .catch(err => console.error('Failed to delete gallery photo:', err));
+    .catch(err => onDeleteFail(err, 'gallery photo'));
   const storagePath = p && p.storagePath;
   if(storagePath){
     storage.ref(`${storagePath}/thumb.jpg`).delete()
-      .catch(err => console.error('Failed to delete thumbnail from storage:', err));
+      .catch(err => onDeleteFail(err, 'thumbnail from storage'));
     storage.ref(`${storagePath}/full.jpg`).delete()
-      .catch(err => console.error('Failed to delete full photo from storage:', err));
+      .catch(err => onDeleteFail(err, 'full photo from storage'));
   }
 }
 function galleryLocationLabel(p){
