@@ -618,6 +618,7 @@ const state = {
   isOnline: true,
   pendingJoinCode: null,   // set from a shared ?join=CODE link, consumed right after sign-in
   toast: null,             // transient error banner: {msg, id}
+  authTimedOut: false,     // true if sign-in state hasn't loaded after a few seconds (private/incognito storage block)
 };
 
 function loadIdentity(){
@@ -1359,7 +1360,12 @@ function renderBroadcastPopup(){
   </div>`;
 }
 function renderLoadingScreen(){
-  return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div></div>`;
+  const hint = state.authTimedOut ? `
+    <div class="onboard-card">
+      <p style="color:var(--text-dim);font-size:14px;margin:0 0 10px;">This is taking longer than usual. If you're in Private/Incognito browsing, this app can't sign you in there - some phone browsers block the storage it needs. Try opening it in a normal (non-private) tab instead.</p>
+      <button class="btn block" onclick="location.reload()">Reload</button>
+    </div>` : '';
+  return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>${hint}</div>`;
 }
 function renderSignIn(){
   return `
@@ -3251,8 +3257,15 @@ loadIdentity();
 consumePendingJoinCodeFromUrl();
 if(FB_READY){
   attachConnectionListener();
+  setTimeout(() => {
+    if(!state.authReady){
+      state.authTimedOut = true;
+      render();
+    }
+  }, 7000);
   firebase.auth().onAuthStateChanged(user => {
     state.authReady = true;
+    state.authTimedOut = false;
     if(user){
       state.userId = user.uid;
       if(!state.name) state.name = user.displayName || 'Friend';
