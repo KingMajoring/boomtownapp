@@ -655,6 +655,20 @@ function clearIdentity(){
    Firebase data access
    --------------------------------------------------------------------- */
 let usersRef = null;
+const globalPicksBackfillAttempted = new Set(); // crew codes already tried this session - avoids double-counting while the remote gpSynced flag round-trips
+function maybeBackfillGlobalPicks(me){
+  if(!FB_READY || !state.code || !me || me.gpSynced) return;
+  if(globalPicksBackfillAttempted.has(state.code)) return;
+  globalPicksBackfillAttempted.add(state.code);
+  const picks = me.picks || {};
+  Object.keys(picks).forEach(k => {
+    const tag = picks[k];
+    if(!tag) return;
+    bumpGlobalPickCount(parseInt(k.slice(1),10), null, tag);
+  });
+  db.ref(`crews/${state.code}/users/${state.userId}/gpSynced`).set(true)
+    .catch(err => console.error('Failed to mark global picks synced:', err));
+}
 function attachListener(){
   if(!FB_READY || !state.code) return;
   if(usersRef) usersRef.off();
@@ -671,6 +685,7 @@ function attachListener(){
     }
     state.crewUsers = val;
     try{ localStorage.setItem('boomtown_crew_cache_'+state.code, JSON.stringify(state.crewUsers)); }catch(e){}
+    maybeBackfillGlobalPicks(val[state.userId]);
     render();
   });
   attachBingoListener();
