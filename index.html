@@ -571,6 +571,13 @@ const state = {
   authReady: false,
   authError: null,
   showInstallHelp: false,
+  usernameFormOpen: false,
+  usernameFormMode: 'signin',  // 'signin' | 'signup'
+  usernameInput: '',
+  usernamePasswordInput: '',
+  usernameConfirmInput: '',
+  usernameAuthError: null,
+  usernameAuthBusy: false,
   userId: null,
   name: null,
   code: null,
@@ -749,6 +756,55 @@ function signInWithGoogle(){
 function signOutUser(){
   if(!FB_READY) return;
   firebase.auth().signOut().catch(err => console.error('Sign-out failed:', err));
+}
+const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{2,19}$/;
+function usernameToFakeEmail(username){
+  // Firebase Auth has no native "username" concept, only email/password - so we
+  // derive a stable, never-emailed-to placeholder address from the username.
+  // This also means Firebase's own account-uniqueness check doubles as our
+  // username-uniqueness check, for free, with no separate registry needed.
+  return username.toLowerCase() + '@users.boomtown-crew.invalid';
+}
+function validateUsername(username){
+  if(!USERNAME_RE.test(username)) return 'Username must be 3-20 characters, start with a letter, and use only letters, numbers or underscores.';
+  return null;
+}
+function signUpWithUsername(username, password){
+  if(!FB_READY) return;
+  state.usernameAuthError = null;
+  const validationErr = validateUsername(username);
+  if(validationErr){ state.usernameAuthError = validationErr; render(); return; }
+  if(password.length < 6){ state.usernameAuthError = 'Password must be at least 6 characters.'; render(); return; }
+  state.usernameAuthBusy = true;
+  render();
+  const email = usernameToFakeEmail(username);
+  firebase.auth().createUserWithEmailAndPassword(email, password)
+    .then(cred => cred.user.updateProfile({displayName: username}))
+    .catch(err => {
+      console.error('Username sign-up failed:', err);
+      state.usernameAuthBusy = false;
+      if(err && err.code === 'auth/email-already-in-use'){
+        state.usernameAuthError = 'That username is already taken.';
+      } else if(err && err.code === 'auth/weak-password'){
+        state.usernameAuthError = 'Password must be at least 6 characters.';
+      } else {
+        state.usernameAuthError = (err && err.message) || 'Signup failed - please try again.';
+      }
+      render();
+    });
+}
+function signInWithUsername(username, password){
+  if(!FB_READY) return;
+  state.usernameAuthError = null;
+  state.usernameAuthBusy = true;
+  render();
+  const email = usernameToFakeEmail(username);
+  firebase.auth().signInWithEmailAndPassword(email, password).catch(err => {
+    console.error('Username sign-in failed:', err);
+    state.usernameAuthBusy = false;
+    state.usernameAuthError = 'Incorrect username or password.';
+    render();
+  });
 }
 function ensureProfile(){
   db.ref(`profiles/${state.userId}`).once('value').then(snap=>{
@@ -1411,6 +1467,25 @@ function renderLoadingScreen(){
     </div>` : '';
   return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>${hint}</div>`;
 }
+function renderUsernameAuthForm(){
+  const isSignup = state.usernameFormMode === 'signup';
+  const canSubmit = state.usernameInput.trim().length >= 3 && state.usernamePasswordInput.length >= 6 && (!isSignup || state.usernameConfirmInput === state.usernamePasswordInput);
+  return `
+  <div style="margin-top:12px;">
+    <input id="usernameInput" placeholder="Username" value="${escapeHtml(state.usernameInput)}" autocomplete="username" autocapitalize="none" maxlength="20">
+    <div style="height:8px"></div>
+    <input id="usernamePasswordInput" type="password" placeholder="Password" value="${escapeHtml(state.usernamePasswordInput)}" autocomplete="${isSignup?'new-password':'current-password'}">
+    ${isSignup ? `
+    <div style="height:8px"></div>
+    <input id="usernameConfirmInput" type="password" placeholder="Confirm password" value="${escapeHtml(state.usernameConfirmInput)}" autocomplete="new-password">` : ''}
+    ${state.usernameAuthError ? `<div class="err-text">${escapeHtml(state.usernameAuthError)}</div>` : ''}
+    ${isSignup ? `<p style="color:var(--text-dim);font-size:12px;margin:8px 0 0;">No email is collected, so there's no way to recover a forgotten password &mdash; keep it somewhere safe.</p>` : ''}
+    <div style="height:10px"></div>
+    <button class="btn primary block" data-action="submit-username-auth" ${(!canSubmit || state.usernameAuthBusy) ? 'disabled' : ''}>${state.usernameAuthBusy ? 'Please wait&hellip;' : (isSignup ? 'Create account' : 'Sign in')}</button>
+    <button class="link-btn" data-action="toggle-username-mode" style="display:block;text-align:center;width:100%;margin-top:6px;">${isSignup ? 'Already have an account? Sign in' : "Don't have an account? Create one"}</button>
+    <button class="link-btn" data-action="toggle-username-form" style="display:block;text-align:center;width:100%;padding-top:2px;">Cancel</button>
+  </div>`;
+}
 function renderSignIn(){
   return `
   <div class="onboard">
@@ -1420,6 +1495,7 @@ function renderSignIn(){
       ${state.pendingJoinCode ? `<p style="color:var(--gold);font-size:13.5px;margin:0 0 4px;">You've been invited to a crew — sign in and you'll join it automatically.</p>` : ''}
       <button class="btn primary block" data-action="sign-in-google" style="display:flex;align-items:center;justify-content:center;gap:10px;">${iconGoogle()}Sign in with Google</button>
       ${state.authError ? `<div class="err-text">${escapeHtml(state.authError)}</div>` : ''}
+      ${state.usernameFormOpen ? renderUsernameAuthForm() : `<button class="link-btn" data-action="toggle-username-form" style="display:block;text-align:center;width:100%;margin-top:10px;">Or sign in with a username</button>`}
       ${renderInstallHelper()}
     </div>
   </div>`;
@@ -2959,6 +3035,31 @@ document.addEventListener('click', function(e){
       state.sheet = {type:'photo'}; render(); return;
     case 'sign-in-google':
       signInWithGoogle(); return;
+    case 'toggle-username-form':
+      state.usernameFormOpen = !state.usernameFormOpen;
+      state.usernameAuthError = null;
+      render();
+      return;
+    case 'toggle-username-mode':
+      state.usernameFormMode = state.usernameFormMode === 'signup' ? 'signin' : 'signup';
+      state.usernameAuthError = null;
+      render();
+      return;
+    case 'submit-username-auth': {
+      const username = state.usernameInput.trim();
+      const password = state.usernamePasswordInput;
+      if(state.usernameFormMode === 'signup'){
+        if(password !== state.usernameConfirmInput){
+          state.usernameAuthError = 'Passwords do not match.';
+          render();
+          return;
+        }
+        signUpWithUsername(username, password);
+      } else {
+        signInWithUsername(username, password);
+      }
+      return;
+    }
     case 'toggle-install-help':
       state.showInstallHelp = !state.showInstallHelp; render(); return;
     case 'install-now':
@@ -3172,12 +3273,34 @@ document.addEventListener('click', function(e){
   }
 });
 
+function updateUsernameSubmitButtonState(){
+  const btn = document.querySelector('[data-action="submit-username-auth"]');
+  if(!btn) return;
+  const isSignup = state.usernameFormMode === 'signup';
+  const canSubmit = state.usernameInput.trim().length >= 3 && state.usernamePasswordInput.length >= 6 && (!isSignup || state.usernameConfirmInput === state.usernamePasswordInput);
+  btn.disabled = !canSubmit || state.usernameAuthBusy;
+}
 document.addEventListener('input', function(e){
   if(e.target.id === 'joinCodeInput'){
     state.joinCode = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,CODE_LENGTH);
     e.target.value = state.joinCode;
     const btn = document.getElementById('joinBtn');
     if(btn) btn.disabled = state.joinCode.length < MIN_JOIN_CODE_LENGTH;
+    return;
+  }
+  if(e.target.id === 'usernameInput'){
+    state.usernameInput = e.target.value;
+    updateUsernameSubmitButtonState();
+    return;
+  }
+  if(e.target.id === 'usernamePasswordInput'){
+    state.usernamePasswordInput = e.target.value;
+    updateUsernameSubmitButtonState();
+    return;
+  }
+  if(e.target.id === 'usernameConfirmInput'){
+    state.usernameConfirmInput = e.target.value;
+    updateUsernameSubmitButtonState();
     return;
   }
   if(e.target.id === 'chatInput'){
@@ -3318,6 +3441,10 @@ document.addEventListener('keydown', function(e){
       state.chatDraft = '';
       render();
     }
+    if((e.target.id === 'usernameInput' || e.target.id === 'usernamePasswordInput' || e.target.id === 'usernameConfirmInput')){
+      const btn = document.querySelector('[data-action="submit-username-auth"]');
+      if(btn && !btn.disabled) btn.click();
+    }
   }
 });
 
@@ -3367,6 +3494,13 @@ if(FB_READY){
       state.isAdmin = false;
       state.broadcastMsg = null;
       state.seenBroadcastId = null;
+      state.usernameFormOpen = false;
+      state.usernameFormMode = 'signin';
+      state.usernameInput = '';
+      state.usernamePasswordInput = '';
+      state.usernameConfirmInput = '';
+      state.usernameAuthError = null;
+      state.usernameAuthBusy = false;
       saveIdentity();
     }
     render();
