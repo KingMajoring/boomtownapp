@@ -3471,6 +3471,25 @@ if(FB_READY){
       if(!state.name) state.name = user.displayName || 'Friend';
       ensureProfile();
       state.myCrewsLoaded = false;
+      // Signing in itself works fully offline (it's resolved from local
+      // persistence), but everything after that - the crew-index backfill,
+      // loadMyCrews()'s database read - needs a real connection and can hang
+      // indefinitely with no signal at all, since Firebase doesn't reject
+      // reads/writes just because it's offline, it waits. If nothing's
+      // resolved this by the timeout, fall back to whatever this device
+      // already has cached locally instead of leaving the user stuck on the
+      // logo screen forever.
+      setTimeout(() => {
+        if(!state.userId || state.myCrewsLoaded) return;
+        state.myCrewsLoaded = true;
+        if(state.code && !state.crewEntered){
+          state.crewEntered = true;
+          state.myCrews = state.myCrews || {};
+          state.myCrews[state.code] = state.myCrews[state.code] || {joinedAt: Date.now()};
+          attachListener();
+        }
+        render();
+      }, 7000);
       if(state.pendingJoinCode){
         const codeToJoin = state.pendingJoinCode;
         state.pendingJoinCode = null;
