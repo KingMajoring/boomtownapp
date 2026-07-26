@@ -591,6 +591,8 @@ const state = {
   planMode: 'mine',      // 'mine' or 'crew'
   notifiedActs: loadNotifiedActs(),
   heatDay: 'all',
+  heatScope: 'crew',     // 'crew' | 'global' - global shows anonymised counts across all users, no names
+  globalPickCounts: {},  // live from firebase: { actIdx: {must,maybe} }, no user/crew info
   sheet: null,           // {type:'detail',actIdx} | {type:'clash',actIdxs:[]} | {type:'crew'} | {type:'photo'} | {type:'live-picker'}
   liveStagePick: null,
   liveActPick: '',
@@ -675,6 +677,19 @@ function attachListener(){
   attachGroupListener();
   attachChatListener();
   attachGalleryListener();
+}
+let globalPicksRef = null;
+function attachGlobalPicksListener(){
+  if(!FB_READY || globalPicksRef) return;
+  globalPicksRef = db.ref('globalPicks');
+  globalPicksRef.on('value', snap => {
+    state.globalPickCounts = snap.val() || {};
+    render();
+  });
+}
+function detachGlobalPicksListener(){
+  if(globalPicksRef){ globalPicksRef.off(); globalPicksRef = null; }
+  state.globalPickCounts = {};
 }
 function handleRemovedFromCrew(){
   const removedCode = state.code;
@@ -1087,6 +1102,7 @@ function setMyPick(actIdx, tag){
   if(!FB_READY) return;
   const me = state.crewUsers[state.userId] = state.crewUsers[state.userId] || {name: state.name, picks:{}};
   me.picks = me.picks || {};
+  const oldTag = me.picks['a'+actIdx] || null;
   if(tag) me.picks['a'+actIdx] = tag; else delete me.picks['a'+actIdx];
   const path = `crews/${state.code}/users/${state.userId}`;
   db.ref(path).update({
@@ -1094,6 +1110,19 @@ function setMyPick(actIdx, tag){
     name: state.name,
     updated: firebase.database.ServerValue.TIMESTAMP
   }).catch(err => console.error('Failed to save pick:', err));
+  bumpGlobalPickCount(actIdx, oldTag, tag);
+}
+function bumpGlobalPickCount(actIdx, oldTag, newTag){
+  // anonymised, crew-agnostic tally of how many people picked each act -
+  // no uid or crew code is ever written here, just a running count
+  if(!FB_READY || oldTag === newTag) return;
+  const step = (t, delta) => {
+    if(!t) return;
+    db.ref(`globalPicks/${actIdx}/${t}`).transaction(v => Math.max(0, (v||0) + delta))
+      .catch(err => console.error('Failed to update global pick count:', err));
+  };
+  step(oldTag, -1);
+  step(newTag, 1);
 }
 function setLive(payload){
   if(!FB_READY) return;
@@ -2149,25 +2178,47 @@ function renderPlanItem(actIdx, clashSet, mode){
 /* ---------------------------------------------------------------------
    Heat tab
    --------------------------------------------------------------------- */
+function globalActScore(actIdx){
+  const g = state.globalPickCounts[actIdx];
+  return g ? (g.must||0)*2 + (g.maybe||0) : 0;
+}
+function globalCountsLabel(actIdx){
+  const g = state.globalPickCounts[actIdx] || {};
+  const parts = [];
+  if(g.must) parts.push(`${g.must} must-see`);
+  if(g.maybe) parts.push(`${g.maybe} maybe`);
+  return parts.join(' &middot; ');
+}
 function renderHeatTab(){
+  const scope = state.heatScope || 'crew';
+  const scopeToggle = `
+    <div class="chip-row" style="margin-bottom:10px;">
+      <button class="pill ${scope==='crew'?'active':''}" data-action="set-heat-scope" data-scope="crew">My crew</button>
+      <button class="pill ${scope==='global'?'active':''}" data-action="set-heat-scope" data-scope="global">&#128293; All Boomtown</button>
+    </div>`;
   let idxRange;
   if(state.heatDay === 'all'){
     idxRange = ACTS.map((a,i)=>i);
   } else {
     idxRange = actsForDay(state.heatDay).map(x=>x.i);
   }
-  const scored = idxRange.map(i => ({i, score: actScore(i)})).filter(s=>s.score>0);
+  const scoreFn = scope === 'global' ? globalActScore : actScore;
+  const scored = idxRange.map(i => ({i, score: scoreFn(i)})).filter(s=>s.score>0);
   scored.sort((a,b)=>b.score-a.score);
   const top = scored.slice(0,50);
   const maxScore = Math.max(1, ...top.map(s=>s.score));
   if(!top.length){
-    return `${renderDayPills('heat', true)}<div class="empty-state">No crew picks yet. Once your crew starts tagging MUST/MAYBE acts, the leaderboard shows up here.</div>`;
+    const emptyMsg = scope === 'global'
+      ? "No hot picks yet &mdash; once enough people across Boomtown start tagging Must-see/Maybe, the trending list shows up here."
+      : 'No crew picks yet. Once your crew starts tagging MUST/MAYBE acts, the leaderboard shows up here.';
+    return `${scopeToggle}${renderDayPills('heat', true)}<div class="empty-state">${emptyMsg}</div>`;
   }
   const rows = top.map((s,rank)=>{
     const act = ACTS[s.i];
-    const {must,maybe} = actTaggers(s.i);
     const pct = Math.round(s.score/maxScore*100);
-    const avatars = renderTaggerAvatars(s.i);
+    const extra = scope === 'global'
+      ? `<div class="heat-meta">${globalCountsLabel(s.i)}</div>`
+      : renderTaggerAvatars(s.i);
     return `
     <div class="heat-row">
       <div class="heat-rank">#${rank+1}</div>
@@ -2175,12 +2226,12 @@ function renderHeatTab(){
         <div class="heat-title">${escapeHtml(act[4])}</div>
         <div class="heat-meta">${escapeHtml(STAGES[act[0]])} &middot; ${DAY_LABELS[act[1]]} &middot; ${act[2]}</div>
         <div class="backing-bar-track"><div class="backing-bar-fill" style="width:${Math.max(6,pct)}%"></div></div>
-        ${avatars}
+        ${extra}
       </div>
       <div class="heat-score">${s.score}</div>
     </div>`;
   }).join('');
-  return `${renderDayPills('heat', true)}${rows}`;
+  return `${scopeToggle}${renderDayPills('heat', true)}${rows}`;
 }
 
 /* ---------------------------------------------------------------------
@@ -2504,7 +2555,7 @@ function renderSheet(){
 const HELP_SECTIONS = [
   {tab: 'lineup', title: 'Line-up', body: 'See every set at Boomtown, grouped by stage. Tap MUST or MAYBE on any act to add it to your plan — your crew sees your picks too, and picks turn up as little avatars on the act. Switch between List and Schedule (a visual timetable) with the toggle at the top, and use the search box to jump straight to an act or stage.'},
   {tab: 'plan', title: 'My Plan', body: 'Your personal schedule of everything you’ve tagged, with a live countdown to what’s next. Flip to Crew view to see the same thing for your whole group instead of just you. Clashing sets are flagged automatically with a one-tap way to resolve them, and you can leave a note on any act or remove it from your plan.'},
-  {tab: 'heat', title: 'Heat', body: 'A leaderboard of the acts your crew is most excited for — ranked by how many MUST/MAYBE tags they’ve picked up. Good for spotting what’s secretly blowing up before you commit your day around it.'},
+  {tab: 'heat', title: 'Heat', body: 'A leaderboard of the acts your crew is most excited for — ranked by how many MUST/MAYBE tags they’ve picked up. Switch to "All Boomtown" to see which acts are trending across every crew using the app — just anonymous counts, never who picked what or which crew they’re in. Good for spotting what’s secretly blowing up before you commit your day around it.'},
   {tab: 'live', title: 'Live', body: 'Check in at a stage (with an optional photo) so your crew can see where you are right now, and tap “I’ve left” when you move on — both post automatically to the crew chat. If you turn on “Share my location”, your crew can also see a live pin for you on a map. Everything here is opt-in and stops the moment you turn it off.'},
   {tab: 'chat', title: 'Chat', body: 'A group chat just for your crew. Type @ to bring up a list of names, or tap someone’s name chip to tag them — tagged messages are highlighted and can trigger a notification for that person. Every message is timestamped.'},
   {tab: 'photos', title: 'Photos', body: 'A shared photo album for the whole crew — everyone sees everyone’s photos. Take one with the camera or pick from your gallery, then optionally log where it was taken (any stage, around camp, or just wandering); picking a stage pre-fills the band from whoever’s playing there right then. Filter the grid by person or place, and pick more than one of each at a time.'},
@@ -2844,6 +2895,11 @@ document.addEventListener('click', function(e){
     }
     case 'set-heat-day':
       state.heatDay = btn.dataset.day==='all' ? 'all' : parseInt(btn.dataset.day,10); render(); return;
+    case 'set-heat-scope':
+      state.heatScope = btn.dataset.scope;
+      if(state.heatScope === 'global') attachGlobalPicksListener();
+      render();
+      return;
     case 'set-lineup-view':
       state.lineupView = btn.dataset.view; render(); return;
     case 'toggle-stage': {
@@ -3285,6 +3341,7 @@ if(FB_READY){
       }
     } else {
       detachListeners();
+      detachGlobalPicksListener();
       state.userId = null;
       state.code = null;
       state.crewUsers = {};
