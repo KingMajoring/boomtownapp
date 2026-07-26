@@ -1462,7 +1462,7 @@ function renderBroadcastPopup(){
 function renderLoadingScreen(){
   const hint = state.authTimedOut ? `
     <div class="onboard-card">
-      <p style="color:var(--text-dim);font-size:14px;margin:0 0 10px;">This is taking longer than usual. If you're in Private/Incognito browsing, this app can't sign you in there - some phone browsers block the storage it needs. Try opening it in a normal (non-private) tab instead.</p>
+      <p style="color:var(--text-dim);font-size:14px;margin:0 0 10px;">This is taking longer than usual. Signing in needs at least a brief connection the very first time each session - once that's happened, most of the app works fine with no signal. If you're on a normal (non-private) tab and still stuck with no connection at all, try again once you've got even a little signal.</p>
       <button class="btn block" onclick="location.reload()">Reload</button>
     </div>` : '';
   return `<div class="onboard"><div class="onboard-logo">BOOMTOWN<small>CREW &middot; 2026</small></div>${hint}</div>`;
