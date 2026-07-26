@@ -1,9 +1,24 @@
-const CACHE_NAME = 'boomtown-crew-v2';
+const CACHE_NAME = 'boomtown-crew-v3';
 const SHELL_ASSETS = ['./', './index.html', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
+// Firebase's SDK scripts are loaded from a cross-origin CDN with plain <script>
+// tags, so responses for them are opaque (no CORS headers requested) - cache.addAll
+// rejects on those for some engines, so they're fetched+cached separately below
+// with an explicit no-cors mode instead of being mixed into SHELL_ASSETS.
+const EXTERNAL_ASSETS = [
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js',
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js',
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js',
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js'
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then(cache => Promise.all([
+      cache.addAll(SHELL_ASSETS),
+      ...EXTERNAL_ASSETS.map(url =>
+        fetch(url, {mode: 'no-cors'}).then(res => cache.put(url, res)).catch(() => {})
+      )
+    ])).then(() => self.skipWaiting())
   );
 });
 
@@ -39,7 +54,10 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(req).then(cached => {
       const networkFetch = fetch(req).then(res => {
-        if(res && res.status === 200){
+        // opaque (status 0) responses show up for cross-origin requests made
+        // without CORS, like the Firebase SDK <script> tags - still worth
+        // caching so they're available offline, we just can't inspect them
+        if(res && (res.status === 200 || res.type === 'opaque')){
           const resClone = res.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(req, resClone));
         }
