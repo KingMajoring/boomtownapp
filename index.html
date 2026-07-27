@@ -662,19 +662,29 @@ function clearIdentity(){
    Firebase data access
    --------------------------------------------------------------------- */
 let usersRef = null;
-const globalPicksBackfillAttempted = new Set(); // crew codes already tried this session - avoids double-counting while the remote gpSynced flag round-trips
+const globalPicksBackfillAttempted = new Set(); // crew codes already tried this session - avoids retrying on every unrelated listener tick while a genuine attempt is still in flight
 function maybeBackfillGlobalPicks(me){
-  if(!FB_READY || !state.code || !me || me.gpSynced) return;
+  // named gpSynced2 (not gpSynced) deliberately - the original gpSynced flag
+  // got set to true for basically every existing account before the
+  // globalPicks security rule was ever published, because the flag was
+  // written unconditionally instead of only after the writes actually
+  // succeeded. Renaming gives every account a clean, one-time retry under
+  // the corrected logic below, which only marks it done once the writes are
+  // genuinely confirmed.
+  if(!FB_READY || !state.code || !me || me.gpSynced2) return;
   if(globalPicksBackfillAttempted.has(state.code)) return;
   globalPicksBackfillAttempted.add(state.code);
   const picks = me.picks || {};
-  Object.keys(picks).forEach(k => {
-    const tag = picks[k];
-    if(!tag) return;
-    bumpGlobalPickCount(parseInt(k.slice(1),10), null, tag);
-  });
-  db.ref(`crews/${state.code}/users/${state.userId}/gpSynced`).set(true)
-    .catch(err => console.error('Failed to mark global picks synced:', err));
+  const tagged = Object.keys(picks).filter(k => picks[k]);
+  Promise.all(tagged.map(k => bumpGlobalPickCount(parseInt(k.slice(1),10), null, picks[k])))
+    .then(() => {
+      db.ref(`crews/${state.code}/users/${state.userId}/gpSynced2`).set(true)
+        .catch(err => console.error('Failed to mark global picks synced:', err));
+    })
+    .catch(err => {
+      console.error('Failed to backfill global picks (will retry next sync):', err);
+      globalPicksBackfillAttempted.delete(state.code);
+    });
 }
 function attachListener(){
   if(!FB_READY || !state.code) return;
@@ -1181,19 +1191,21 @@ function setMyPick(actIdx, tag){
     name: state.name,
     updated: firebase.database.ServerValue.TIMESTAMP
   }).catch(err => console.error('Failed to save pick:', err));
-  bumpGlobalPickCount(actIdx, oldTag, tag);
+  bumpGlobalPickCount(actIdx, oldTag, tag).catch(err => console.error('Failed to update global pick count:', err));
 }
 function bumpGlobalPickCount(actIdx, oldTag, newTag){
   // anonymised, crew-agnostic tally of how many people picked each act -
-  // no uid or crew code is ever written here, just a running count
-  if(!FB_READY || oldTag === newTag) return;
+  // no uid or crew code is ever written here, just a running count.
+  // Returns a promise that rejects if either write actually fails (e.g. the
+  // security rule denies it) - callers that need to know whether this
+  // genuinely succeeded (the backfill) rely on that; fire-and-forget callers
+  // just attach their own .catch().
+  if(!FB_READY || oldTag === newTag) return Promise.resolve();
   const step = (t, delta) => {
-    if(!t) return;
-    db.ref(`globalPicks/${actIdx}/${t}`).transaction(v => Math.max(0, (v||0) + delta))
-      .catch(err => console.error('Failed to update global pick count:', err));
+    if(!t) return Promise.resolve();
+    return db.ref(`globalPicks/${actIdx}/${t}`).transaction(v => Math.max(0, (v||0) + delta));
   };
-  step(oldTag, -1);
-  step(newTag, 1);
+  return Promise.all([step(oldTag, -1), step(newTag, 1)]);
 }
 function setLive(payload){
   if(!FB_READY) return;
