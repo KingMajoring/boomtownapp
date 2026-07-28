@@ -318,6 +318,7 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-messaging-compat.js"></script>
 <script>
 /* =====================================================================
    FIREBASE CONFIG
@@ -345,6 +346,14 @@ const FB_READY = !!(FIREBASE_CONFIG.apiKey && typeof FIREBASE_CONFIG.apiKey === 
    ===================================================================== */
 const GOOGLE_MAPS_API_KEY = "AIzaSyAqSVXy4bA-TJe49l-m8YoZZc-XYaKe5ag";
 const MAPS_READY = !!(GOOGLE_MAPS_API_KEY && !GOOGLE_MAPS_API_KEY.startsWith('PASTE_'));
+
+/* =====================================================================
+   PASTE YOUR FCM VAPID KEY BELOW to enable background push notifications
+   for crew chat. Firebase console -> Project settings -> Cloud Messaging
+   -> Web Push certificates -> generate a key pair if you don't have one.
+   ===================================================================== */
+const FCM_VAPID_KEY = "PASTE_YOUR_VAPID_KEY_HERE";
+const FCM_READY = FB_READY && !!(FCM_VAPID_KEY && !FCM_VAPID_KEY.startsWith('PASTE_'));
 
 /* App admins (can send announcements to everyone). Add more UIDs here
    if needed - the same UIDs must also be added to the "broadcast" write
@@ -688,6 +697,10 @@ function maybeBackfillGlobalPicks(me){
 }
 function attachListener(){
   if(!FB_READY || !state.code) return;
+  // FCM tokens can rotate, and a returning user's token from a previous
+  // session may be stale - re-save it each time they're freshly in a crew,
+  // if they'd already granted permission
+  if(typeof Notification !== 'undefined' && Notification.permission === 'granted') requestPushToken();
   if(usersRef) usersRef.off();
   usersRef = db.ref(`crews/${state.code}/users`);
   let sawSelf = false;
@@ -830,6 +843,23 @@ function ensureProfile(){
     checkAdmin();
     render();
   }).catch(err=>console.error('Failed to load profile:', err));
+}
+function requestPushToken(){
+  // Reuses the app's own sw.js registration (which already handles the
+  // background message listener - see sw.js) instead of letting Firebase
+  // auto-register a separate firebase-messaging-sw.js. Two service workers
+  // both trying to control the same origin would fight over which one
+  // actually serves the app, breaking the offline caching this app relies
+  // on - so FCM is folded into the existing one instead.
+  if(!FCM_READY || !state.userId || !state.code) return;
+  if(!('serviceWorker' in navigator) || typeof firebase.messaging !== 'function') return;
+  navigator.serviceWorker.ready.then(registration => (
+    firebase.messaging().getToken({vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: registration})
+  )).then(token => {
+    if(!token) return;
+    db.ref(`crews/${state.code}/users/${state.userId}/fcmToken`).set(token)
+      .catch(err => console.error('Failed to save push token:', err));
+  }).catch(err => console.error('Failed to get push token:', err));
 }
 function checkBroadcast(){
   db.ref('broadcast').once('value').then(snap => {
@@ -2202,7 +2232,7 @@ function renderNextUpCard(){
 }
 function renderNotifyBanner(){
   if(typeof Notification === 'undefined' || Notification.permission !== 'default') return '';
-  return `<button class="btn block" data-action="enable-notifications" style="margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;">${iconBell()} Get reminders for your MUST picks</button>`;
+  return `<button class="btn block" data-action="enable-notifications" style="margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px;">${iconBell()} Get reminders for your MUST picks &amp; new chat messages</button>`;
 }
 function getFilteredPickIdxs(mode){
   let actIdxs = mode==='mine' ? myPicksList().map(p=>p.actIdx) : allCrewPickedActIdxs();
@@ -2956,7 +2986,10 @@ document.addEventListener('click', function(e){
     case 'remove-pick':
       setMyPick(parseInt(btn.dataset.act,10), null); render(); return;
     case 'enable-notifications':
-      if(typeof Notification !== 'undefined') Notification.requestPermission().then(()=>render());
+      if(typeof Notification !== 'undefined') Notification.requestPermission().then((perm) => {
+        if(perm === 'granted') requestPushToken();
+        render();
+      });
       return;
     case 'open-note':
       state.sheet = {type:'note', actIdx: parseInt(btn.dataset.act,10)}; render(); return;

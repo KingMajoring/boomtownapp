@@ -1,4 +1,4 @@
-const CACHE_NAME = 'boomtown-crew-v3';
+const CACHE_NAME = 'boomtown-crew-v4';
 const SHELL_ASSETS = ['./', './index.html', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
 // Firebase's SDK scripts are loaded from a cross-origin CDN with plain <script>
 // tags, so responses for them are opaque (no CORS headers requested) - cache.addAll
@@ -8,7 +8,8 @@ const EXTERNAL_ASSETS = [
   'https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js',
   'https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js',
   'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js',
-  'https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js'
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js',
+  'https://www.gstatic.com/firebasejs/10.13.0/firebase-messaging-compat.js'
 ];
 
 self.addEventListener('install', (event) => {
@@ -64,6 +65,61 @@ self.addEventListener('fetch', (event) => {
         return res;
       }).catch(() => cached);
       return cached || networkFetch;
+    })
+  );
+});
+
+// ---------------------------------------------------------------------
+// Background push notifications (Firebase Cloud Messaging)
+//
+// This is folded into the app's own service worker rather than a separate
+// firebase-messaging-sw.js, deliberately - only one service worker can
+// actually control a given scope, and this app already registers this file
+// at the root scope for offline caching. Registering a second one would
+// mean one silently replaces the other as the controller for that scope,
+// breaking the offline support built above. Firebase supports pointing
+// getToken() at an existing service worker registration instead of
+// auto-registering its own, which is what the app does (see
+// requestPushToken() in index.html).
+// ---------------------------------------------------------------------
+try {
+  importScripts('https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js');
+  importScripts('https://www.gstatic.com/firebasejs/10.13.0/firebase-messaging-compat.js');
+
+  firebase.initializeApp({
+    apiKey: 'AIzaSyBfdRk5KUGINJtpAehZweLfLevx602GtGI',
+    authDomain: 'boomtown-yourcrew.firebaseapp.com',
+    databaseURL: 'https://boomtown-yourcrew-default-rtdb.europe-west1.firebasedatabase.app',
+    projectId: 'boomtown-yourcrew',
+    storageBucket: 'boomtown-yourcrew.firebasestorage.app',
+    messagingSenderId: '40912478731',
+    appId: '1:40912478731:web:b6a65954bcbc0aff0a5d0e'
+  });
+
+  const messaging = firebase.messaging();
+  messaging.onBackgroundMessage((payload) => {
+    const title = (payload.notification && payload.notification.title) || 'Boomtown Crew';
+    const body = (payload.notification && payload.notification.body) || '';
+    self.registration.showNotification(title, {
+      body,
+      icon: './icons/icon-192.png',
+      badge: './icons/icon-192.png',
+      data: payload.data || {}
+    });
+  });
+} catch (e) {
+  // FCM isn't available in every browser/context (e.g. some in-app
+  // browsers) - the rest of this service worker (offline caching) still
+  // needs to work regardless of whether push notifications do
+}
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(clientsArr => {
+      const existing = clientsArr.find(c => c.url.includes(self.registration.scope) && 'focus' in c);
+      if(existing) return existing.focus();
+      return self.clients.openWindow('./');
     })
   );
 });
