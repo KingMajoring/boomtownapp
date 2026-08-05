@@ -2178,12 +2178,14 @@ function icsDate(d){
   return d.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z';
 }
 function buildICS(actIdxs){
-  const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Boomtown Crew//EN'];
+  const lines = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Boomtown Crew//EN','CALSCALE:GREGORIAN'];
+  const stamp = icsDate(new Date());
   actIdxs.forEach(idx=>{
     const act = ACTS[idx];
     lines.push(
       'BEGIN:VEVENT',
       `UID:boomtown-${idx}-${state.userId}@boomtownapp`,
+      `DTSTAMP:${stamp}`,
       `DTSTART:${icsDate(actStart(act))}`,
       `DTEND:${icsDate(actEnd(act))}`,
       `SUMMARY:${icsEscape(act[4])}`,
