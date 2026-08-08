@@ -609,6 +609,7 @@ const state = {
   heatDay: 'all',
   heatScope: 'crew',     // 'crew' | 'global' - global shows anonymised counts across all users, no names
   globalPickCounts: {},  // live from firebase: { actIdx: {must,maybe} }, no user/crew info
+  globalPicksError: false, // true if the globalPicks listener was denied (e.g. security rule), so the UI can tell "no data yet" apart from "can't load"
   sheet: null,           // {type:'detail',actIdx} | {type:'clash',actIdxs:[]} | {type:'crew'} | {type:'photo'} | {type:'live-picker'}
   liveStagePick: null,
   liveActPick: '',
@@ -729,12 +730,21 @@ function attachGlobalPicksListener(){
   globalPicksRef = db.ref('globalPicks');
   globalPicksRef.on('value', snap => {
     state.globalPickCounts = snap.val() || {};
+    state.globalPicksError = false;
+    render();
+  }, err => {
+    // Without this handler a permission-denied read fails silently and the
+    // Heat tab shows the same empty state as "nobody has picked anything",
+    // which is indistinguishable from a real outage/security-rule problem.
+    console.error('Failed to load global picks (permission or rule issue?):', err);
+    state.globalPicksError = true;
     render();
   });
 }
 function detachGlobalPicksListener(){
   if(globalPicksRef){ globalPicksRef.off(); globalPicksRef = null; }
   state.globalPickCounts = {};
+  state.globalPicksError = false;
 }
 function handleRemovedFromCrew(){
   const removedCode = state.code;
@@ -2344,6 +2354,9 @@ function renderHeatTab(){
   scored.sort((a,b)=>b.score-a.score);
   const top = scored.slice(0,50);
   const maxScore = Math.max(1, ...top.map(s=>s.score));
+  if(scope === 'global' && state.globalPicksError){
+    return `${scopeToggle}${renderDayPills('heat', true)}<div class="empty-state">Couldn't load trending picks right now. Check your connection and try again shortly.</div>`;
+  }
   if(!top.length){
     const emptyMsg = scope === 'global'
       ? "No hot picks yet &mdash; once enough people across Boomtown start tagging Must-see/Maybe, the trending list shows up here."
