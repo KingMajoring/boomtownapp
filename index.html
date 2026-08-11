@@ -125,7 +125,13 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .pillrow::-webkit-scrollbar{display:none;}
 .weather-strip{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;scrollbar-width:none;}
 .weather-strip::-webkit-scrollbar{display:none;}
-.weather-day{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 12px;border-radius:12px;border:1px solid var(--border);background:var(--card2);min-width:60px;}
+.weather-day{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 12px;border-radius:12px;border:1px solid var(--border);background:var(--card2);min-width:60px;cursor:pointer;}
+.weather-hour-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--border);}
+.weather-hour-row:last-child{border-bottom:none;}
+.weather-hour-row .wh-time{width:44px;font-family:var(--font-head);font-size:13px;font-weight:600;flex-shrink:0;}
+.weather-hour-row .wh-icon{font-size:18px;width:26px;flex-shrink:0;}
+.weather-hour-row .wh-temp{width:38px;flex-shrink:0;}
+.weather-hour-row .wh-wind{color:var(--text-dim);font-size:12px;margin-left:auto;}
 .weather-day .wd-label{font-family:var(--font-head);font-size:11px;font-weight:600;color:var(--text-dim);}
 .weather-day .wd-icon{font-size:20px;line-height:1.2;}
 .weather-day .wd-temp{font-size:11px;color:var(--text-dim);}
@@ -547,20 +553,37 @@ function weatherInfo(code){ return WEATHER_CODES[code] || ['🌡','Weather']; }
 function fetchWeather(){
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}`
     + `&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max`
+    + `&hourly=temperature_2m,precipitation_probability,weathercode,windspeed_10m`
     + `&timezone=${encodeURIComponent(WEATHER_TZ)}&start_date=${FEST_DATES[0]}&end_date=${FEST_DATES[FEST_DATES.length-1]}`;
   fetch(url).then(res => res.ok ? res.json() : Promise.reject(res.status)).then(data => {
     const d = data.daily;
-    if(!d || !d.time) return;
-    const byDate = {};
-    d.time.forEach((date,i) => {
-      byDate[date] = {
-        code: d.weathercode[i],
-        tmax: Math.round(d.temperature_2m_max[i]),
-        tmin: Math.round(d.temperature_2m_min[i]),
-        pop: d.precipitation_probability_max ? d.precipitation_probability_max[i] : null
-      };
-    });
-    state.weather = byDate;
+    if(d && d.time){
+      const byDate = {};
+      d.time.forEach((date,i) => {
+        byDate[date] = {
+          code: d.weathercode[i],
+          tmax: Math.round(d.temperature_2m_max[i]),
+          tmin: Math.round(d.temperature_2m_min[i]),
+          pop: d.precipitation_probability_max ? d.precipitation_probability_max[i] : null
+        };
+      });
+      state.weather = byDate;
+    }
+    const h = data.hourly;
+    if(h && h.time){
+      const byDateHours = {};
+      h.time.forEach((ts,i) => {
+        const [date, time] = ts.split('T');
+        (byDateHours[date] = byDateHours[date] || []).push({
+          hour: time.slice(0,5),
+          temp: Math.round(h.temperature_2m[i]),
+          pop: h.precipitation_probability ? h.precipitation_probability[i] : null,
+          code: h.weathercode[i],
+          wind: h.windspeed_10m ? Math.round(h.windspeed_10m[i]) : null
+        });
+      });
+      state.weatherHourly = byDateHours;
+    }
     checkWeatherBanner();
     render();
   }).catch(err => console.error('Failed to load weather:', err));
@@ -691,6 +714,7 @@ const state = {
   broadcastMsg: null,        // unseen announcement {id,text} pending "Got it"
   seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
   weather: {},               // Winchester forecast by FEST_DATES date string: {code,tmax,tmin,pop}
+  weatherHourly: {},         // Winchester hourly forecast by FEST_DATES date string: [{hour,temp,pop,code,wind}]
   weatherBanner: null,       // today's unseen weather announcement pending "Got it": {dateStr,dayIdx}
   isOnline: true,
   pendingJoinCode: null,   // set from a shared ?join=CODE link, consumed right after sign-in
@@ -2034,7 +2058,7 @@ function renderWeatherStrip(){
     const w = state.weather[date];
     if(!w) return '';
     const [icon] = weatherInfo(w.code);
-    return `<div class="weather-day"><span class="wd-label">${DAY_LABELS[i]}</span><span class="wd-icon">${icon}</span><span class="wd-temp">${w.tmax}&deg;/${w.tmin}&deg;</span></div>`;
+    return `<div class="weather-day" data-action="open-weather-detail" data-day="${i}"><span class="wd-label">${DAY_LABELS[i]}</span><span class="wd-icon">${icon}</span><span class="wd-temp">${w.tmax}&deg;/${w.tmin}&deg;</span></div>`;
   }).join('');
   return `<div class="weather-strip">${days}</div>`;
 }
@@ -2783,7 +2807,49 @@ function renderSheet(){
   if(state.sheet.type === 'photoview') return overlay(stopClick(renderGalleryViewSheet(state.sheet.key)));
   if(state.sheet.type === 'broadcastcompose') return overlay(stopClick(renderBroadcastComposeSheet()));
   if(state.sheet.type === 'help') return overlay(stopClick(renderHelpSheet()));
+  if(state.sheet.type === 'weather') return overlay(stopClick(renderWeatherDetailSheet(state.sheet.dayIdx)));
   return '';
+}
+const WEATHER_DETAIL_HOURS = ['06:00','09:00','12:00','15:00','18:00','21:00'];
+function renderWeatherDetailSheet(dayIdx){
+  const date = FEST_DATES[dayIdx];
+  const w = state.weather[date];
+  if(!w){
+    return `
+    <div class="sheet sheet-rel">
+      <button class="close-x" data-action="close-sheet">&times;</button>
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">${DAY_FULL[dayIdx]}</div>
+      <div class="sheet-sub">Weather forecast isn&rsquo;t available yet &ndash; check back closer to the day.</div>
+    </div>`;
+  }
+  const [icon, label] = weatherInfo(w.code);
+  const hours = (state.weatherHourly[date] || []).filter(h => WEATHER_DETAIL_HOURS.includes(h.hour));
+  const hourRows = hours.map(h => {
+    const [hIcon] = weatherInfo(h.code);
+    return `
+    <div class="weather-hour-row">
+      <span class="wh-time">${h.hour}</span>
+      <span class="wh-icon">${hIcon}</span>
+      <span class="wh-temp">${h.temp}&deg;C</span>
+      <span>${h.pop!=null ? h.pop+'% rain' : ''}</span>
+      ${h.wind!=null ? `<span class="wh-wind">${h.wind}km/h wind</span>` : ''}
+    </div>`;
+  }).join('');
+  return `
+  <div class="sheet sheet-rel">
+    <button class="close-x" data-action="close-sheet">&times;</button>
+    <div class="sheet-handle"></div>
+    <div class="sheet-title">${DAY_FULL[dayIdx]}</div>
+    <div class="sheet-sub">Winchester, UK</div>
+    <div class="chip-row" style="margin-bottom:14px;">
+      <span class="chip" style="font-size:14px;">${icon} ${label}</span>
+      <span class="chip" style="font-size:14px;">High ${w.tmax}&deg;C &middot; Low ${w.tmin}&deg;C</span>
+      ${w.pop!=null ? `<span class="chip" style="font-size:14px;">${w.pop}% chance of rain</span>` : ''}
+    </div>
+    <div class="field-label">Through the day</div>
+    ${hourRows || '<div class="sheet-sub">No hourly detail available.</div>'}
+  </div>`;
 }
 const HELP_SECTIONS = [
   {tab: 'lineup', title: 'Line-up', body: 'See every set at Boomtown, grouped by stage. Tap MUST or MAYBE on any act to add it to your plan — your crew sees your picks too, and picks turn up as little avatars on the act. Switch between List and Schedule (a visual timetable) with the toggle at the top, and use the search box to jump straight to an act or stage.'},
@@ -3327,6 +3393,8 @@ document.addEventListener('click', function(e){
       dismissBroadcast(); render(); return;
     case 'dismiss-weather-banner':
       dismissWeatherBanner(); render(); return;
+    case 'open-weather-detail':
+      state.sheet = {type:'weather', dayIdx: parseInt(btn.dataset.day,10)}; render(); return;
     case 'open-broadcast-compose':
       state.sheet = {type:'broadcastcompose'}; render(); return;
     case 'open-help':
