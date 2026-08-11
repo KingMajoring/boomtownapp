@@ -123,6 +123,12 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 /* day pills */
 .pillrow{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;scrollbar-width:none;}
 .pillrow::-webkit-scrollbar{display:none;}
+.weather-strip{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;scrollbar-width:none;}
+.weather-strip::-webkit-scrollbar{display:none;}
+.weather-day{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 12px;border-radius:12px;border:1px solid var(--border);background:var(--card2);min-width:60px;}
+.weather-day .wd-label{font-family:var(--font-head);font-size:11px;font-weight:600;color:var(--text-dim);}
+.weather-day .wd-icon{font-size:20px;line-height:1.2;}
+.weather-day .wd-temp{font-size:11px;color:var(--text-dim);}
 .pill{flex:0 0 auto;padding:9px 16px;border-radius:20px;border:1px solid var(--border);background:var(--card2);font-family:var(--font-head);font-size:14px;font-weight:600;white-space:nowrap;}
 .pill.active{background:var(--gold);border-color:var(--gold);color:#1a1210;}
 
@@ -524,6 +530,56 @@ function currentActAtStage(stageIdx){
   }
   return null;
 }
+/* Live weather forecast for the festival site (Winchester, UK) via
+   Open-Meteo's free, key-less forecast API. Fetched once on load and
+   cached in state.weather, keyed by FEST_DATES ISO string. */
+const WEATHER_LAT = 51.0632, WEATHER_LON = -1.3080, WEATHER_TZ = 'Europe/London';
+const WEATHER_CODES = {
+  0:['☀️','Clear sky'], 1:['🌤','Mostly clear'], 2:['⛅','Partly cloudy'], 3:['☁️','Overcast'],
+  45:['🌫','Fog'], 48:['🌫','Fog'],
+  51:['🌦','Light drizzle'], 53:['🌦','Drizzle'], 55:['🌦','Heavy drizzle'],
+  61:['🌧','Light rain'], 63:['🌧','Rain'], 65:['🌧','Heavy rain'],
+  71:['🌨','Light snow'], 73:['🌨','Snow'], 75:['🌨','Heavy snow'],
+  80:['🌦','Rain showers'], 81:['🌧','Rain showers'], 82:['⛈','Heavy showers'],
+  95:['⛈','Thunderstorm'], 96:['⛈','Thunderstorm'], 99:['⛈','Thunderstorm']
+};
+function weatherInfo(code){ return WEATHER_CODES[code] || ['🌡','Weather']; }
+function fetchWeather(){
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}`
+    + `&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max`
+    + `&timezone=${encodeURIComponent(WEATHER_TZ)}&start_date=${FEST_DATES[0]}&end_date=${FEST_DATES[FEST_DATES.length-1]}`;
+  fetch(url).then(res => res.ok ? res.json() : Promise.reject(res.status)).then(data => {
+    const d = data.daily;
+    if(!d || !d.time) return;
+    const byDate = {};
+    d.time.forEach((date,i) => {
+      byDate[date] = {
+        code: d.weathercode[i],
+        tmax: Math.round(d.temperature_2m_max[i]),
+        tmin: Math.round(d.temperature_2m_min[i]),
+        pop: d.precipitation_probability_max ? d.precipitation_probability_max[i] : null
+      };
+    });
+    state.weather = byDate;
+    checkWeatherBanner();
+    render();
+  }).catch(err => console.error('Failed to load weather:', err));
+}
+function checkWeatherBanner(){
+  const idx = FEST_DATES.indexOf(new Date().toISOString().slice(0,10));
+  if(idx < 0) return; // only announce on actual festival days
+  const dateStr = FEST_DATES[idx];
+  if(!state.weather[dateStr]) return; // forecast not loaded yet
+  let seen = null;
+  try{ seen = localStorage.getItem('boomtown_weather_seen'); }catch(e){}
+  if(seen === dateStr) return;
+  state.weatherBanner = {dateStr, dayIdx: idx};
+}
+function dismissWeatherBanner(){
+  if(!state.weatherBanner) return;
+  try{ localStorage.setItem('boomtown_weather_seen', state.weatherBanner.dateStr); }catch(e){}
+  state.weatherBanner = null;
+}
 function formatCountdown(ms){
   if(ms <= 0) return 'now';
   const totalMin = Math.round(ms/60000);
@@ -633,6 +689,8 @@ const state = {
   isAdmin: false,
   broadcastMsg: null,        // unseen announcement {id,text} pending "Got it"
   seenBroadcastId: null,     // from profiles/{uid}.seenBroadcast
+  weather: {},               // Winchester forecast by FEST_DATES date string: {code,tmax,tmin,pop}
+  weatherBanner: null,       // today's unseen weather announcement pending "Got it": {dateStr,dayIdx}
   isOnline: true,
   pendingJoinCode: null,   // set from a shared ?join=CODE link, consumed right after sign-in
   toast: null,             // transient error banner: {msg, id}
@@ -841,6 +899,7 @@ function ensureProfile(){
     state.seenBroadcastId = val.seenBroadcast || null;
     checkBroadcast();
     checkAdmin();
+    checkWeatherBanner();
     render();
   }).catch(err=>console.error('Failed to load profile:', err));
 }
@@ -1477,6 +1536,7 @@ function render(){
   else if(state.onboardStep === 'genres'){ html = renderGenreQuiz(); }
   else { html = renderShell(); isShell = true; }
   if(state.userId && state.broadcastMsg) html += renderBroadcastPopup();
+  else if(state.userId && state.weatherBanner) html += renderWeatherBanner();
   root.innerHTML = html;
   if(isShell && state.tab === 'chat'){
     const thread = document.getElementById('chatThread');
@@ -1498,6 +1558,18 @@ function renderBroadcastPopup(){
       <div class="sheet-title">A message from the app team</div>
       <div class="broadcast-text">${escapeHtml(state.broadcastMsg.text)}</div>
       <button class="btn primary block" data-action="dismiss-broadcast">Got it</button>
+    </div>
+  </div>`;
+}
+function renderWeatherBanner(){
+  const w = state.weather[state.weatherBanner.dateStr];
+  const [icon, label] = weatherInfo(w.code);
+  return `
+  <div class="broadcast-overlay">
+    <div class="broadcast-card">
+      <div class="sheet-title">Today's Winchester weather</div>
+      <div class="broadcast-text">${DAY_FULL[state.weatherBanner.dayIdx]}<br>${icon} ${label} &middot; ${w.tmax}&deg;/${w.tmin}&deg;C${w.pop!=null?` &middot; ${w.pop}% chance of rain`:''}</div>
+      <button class="btn primary block" data-action="dismiss-weather-banner">Got it</button>
     </div>
   </div>`;
 }
@@ -1921,6 +1993,7 @@ function renderTab(){
 function renderLineupTab(){
   const searching = state.search.trim().length > 0;
   return `
+    ${searching ? '' : renderWeatherStrip()}
     ${renderDayPills('day', !searching)}
     <div class="toolbar">
       <div class="viewtoggle">
@@ -1944,6 +2017,16 @@ function renderDayPills(kind, show){
     pills += `<button class="pill ${cur===i?'active':''}" data-action="${action}" data-day="${i}">${label}</button>`;
   });
   return `<div class="pillrow">${pills}</div>`;
+}
+function renderWeatherStrip(){
+  if(!Object.keys(state.weather).length) return '';
+  const days = FEST_DATES.map((date,i) => {
+    const w = state.weather[date];
+    if(!w) return '';
+    const [icon] = weatherInfo(w.code);
+    return `<div class="weather-day"><span class="wd-label">${DAY_LABELS[i]}</span><span class="wd-icon">${icon}</span><span class="wd-temp">${w.tmax}&deg;/${w.tmin}&deg;</span></div>`;
+  }).join('');
+  return `<div class="weather-strip">${days}</div>`;
 }
 function actsForDay(dayIdx){
   return ACTS.map((a,i)=>({a,i})).filter(x=>x.a[1]===dayIdx);
@@ -3229,6 +3312,8 @@ document.addEventListener('click', function(e){
       render(); return;
     case 'dismiss-broadcast':
       dismissBroadcast(); render(); return;
+    case 'dismiss-weather-banner':
+      dismissWeatherBanner(); render(); return;
     case 'open-broadcast-compose':
       state.sheet = {type:'broadcastcompose'}; render(); return;
     case 'open-help':
@@ -3502,6 +3587,7 @@ document.addEventListener('keydown', function(e){
    --------------------------------------------------------------------- */
 loadIdentity();
 consumePendingJoinCodeFromUrl();
+fetchWeather();
 if(FB_READY){
   attachConnectionListener();
   setTimeout(() => {
@@ -3562,6 +3648,7 @@ if(FB_READY){
       state.isAdmin = false;
       state.broadcastMsg = null;
       state.seenBroadcastId = null;
+      state.weatherBanner = null;
       state.usernameFormOpen = false;
       state.usernameFormMode = 'signin';
       state.usernameInput = '';
