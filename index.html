@@ -142,6 +142,9 @@ main{flex:1;padding-top:calc(var(--top-h) + env(safe-area-inset-top));padding-bo
 .viewtoggle{display:flex;background:var(--card2);border-radius:10px;padding:3px;border:1px solid var(--border);flex-shrink:0;}
 .viewtoggle button{border:none;background:none;padding:8px 12px;border-radius:8px;font-family:var(--font-head);font-size:13px;font-weight:600;color:var(--text-dim);}
 .viewtoggle button.active{background:var(--gold);color:#1a1210;}
+.chat-scope-toggle{margin-bottom:12px;overflow-x:auto;}
+.chat-scope-toggle button{white-space:nowrap;flex:1;}
+.builder-badge{display:inline-block;background:var(--gold);color:#1a1210;font-family:var(--font-head);font-size:9.5px;font-weight:700;letter-spacing:.5px;padding:1px 5px;border-radius:4px;margin-left:4px;vertical-align:middle;}
 .searchbox{flex:1;position:relative;}
 .searchbox input{padding-right:34px;}
 
@@ -699,6 +702,15 @@ const state = {
   chatMessages: {},
   chatDraft: '',
   chatMentionQuery: null,
+  chatScope: 'crew',         // 'crew' | 'global' | 'dm'
+  globalChatMessages: {},    // live from firebase: 'globalChat' - everyone using the app
+  globalName: null,          // from profiles/{uid}.globalName - public alias for All Users chat, never the real name/email
+  editingGlobalName: false,  // true while the "pick a username" form is showing over an existing name
+  globalNameDraft: '',
+  globalNameError: null,
+  myDmMessages: {},          // regular users: their own private thread with the builder, dms/{uid}/messages
+  dmAllThreads: {},          // admin only: every user's dms/{uid} -> {messages}
+  dmOpenUid: null,           // admin only: which user's DM thread is open (null = inbox list)
   removedNotice: null,
   liveView: 'list',      // 'list' | 'map'
   sharingLocation: false,
@@ -931,6 +943,7 @@ function ensureProfile(){
         .catch(err=>console.error('Failed to create profile:', err));
     }
     state.seenBroadcastId = val.seenBroadcast || null;
+    state.globalName = val.globalName || null;
     checkBroadcast();
     checkAdmin();
     checkWeatherBanner();
@@ -1176,6 +1189,184 @@ function sendChatMessage(text, opts){
       render();
     });
 }
+/* ---------------------------------------------------------------------
+   All Users chat (everyone signed into the app, not just one crew) and
+   private messages to the builder. Neither is scoped to state.code, so
+   both are only attached lazily when the user switches the Chat tab to
+   that scope, and detached again on sign-out.
+   --------------------------------------------------------------------- */
+let globalChatRef = null;
+function attachGlobalChatListener(){
+  if(!FB_READY || globalChatRef) return;
+  globalChatRef = db.ref('globalChat');
+  globalChatRef.on('value', snap => {
+    const val = snap.val() || {};
+    Object.keys(state.globalChatMessages || {}).forEach(k => {
+      const existing = state.globalChatMessages[k];
+      if(existing && (existing.pending || existing.failed) && !val[k]) val[k] = existing;
+    });
+    state.globalChatMessages = val;
+    render();
+  });
+}
+function detachGlobalChatListener(){
+  if(globalChatRef){ globalChatRef.off(); globalChatRef = null; }
+  state.globalChatMessages = {};
+}
+function sortedGlobalChatMessages(){
+  return Object.keys(state.globalChatMessages || {})
+    .map(k => Object.assign({key: k}, state.globalChatMessages[k]))
+    .sort((a,b) => (a.at||0) - (b.at||0));
+}
+function myGlobalDisplayName(){
+  return state.isAdmin ? 'Builder' : state.globalName;
+}
+function saveGlobalName(name){
+  const trimmed = (name||'').trim();
+  if(!trimmed || trimmed.length > 20){
+    state.globalNameError = 'Pick a username between 1 and 20 characters.';
+    render();
+    return;
+  }
+  if(/^builder$/i.test(trimmed)){
+    state.globalNameError = 'That username is reserved.';
+    render();
+    return;
+  }
+  state.globalName = trimmed;
+  state.editingGlobalName = false;
+  state.globalNameError = null;
+  render();
+  db.ref(`profiles/${state.userId}`).update({globalName: trimmed})
+    .catch(err => console.error('Failed to save username:', err));
+}
+function sendGlobalChatMessage(text, opts){
+  if(!FB_READY || !state.userId) return;
+  opts = opts || {};
+  const trimmed = (text||'').trim();
+  if(!trimmed) return;
+  const name = myGlobalDisplayName();
+  if(!name) return;
+  const key = opts.retryKey || ('m' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+  const existingAt = opts.retryKey && state.globalChatMessages[key] ? state.globalChatMessages[key].at : null;
+  const msg = {uid: state.userId, name, text: trimmed, at: existingAt || Date.now(), pending: true};
+  state.globalChatMessages = Object.assign({}, state.globalChatMessages, {[key]: msg});
+  render();
+  const toSend = Object.assign({}, msg, {at: existingAt ? existingAt : firebase.database.ServerValue.TIMESTAMP});
+  delete toSend.pending;
+  db.ref(`globalChat/${key}`).set(toSend)
+    .then(() => {
+      if(!state.globalChatMessages[key]) return;
+      const cleared = Object.assign({}, state.globalChatMessages[key]);
+      delete cleared.pending; delete cleared.failed;
+      state.globalChatMessages = Object.assign({}, state.globalChatMessages, {[key]: cleared});
+      render();
+    })
+    .catch(err => {
+      console.error('Failed to send global chat message:', err);
+      if(!state.globalChatMessages[key]) return;
+      const failed = Object.assign({}, state.globalChatMessages[key], {failed: true});
+      delete failed.pending;
+      state.globalChatMessages = Object.assign({}, state.globalChatMessages, {[key]: failed});
+      render();
+    });
+}
+let dmRef = null;
+function attachDmListener(){
+  if(!FB_READY || !state.userId || dmRef) return;
+  if(state.isAdmin){
+    dmRef = db.ref('dms');
+    dmRef.on('value', snap => {
+      state.dmAllThreads = snap.val() || {};
+      render();
+    });
+  } else {
+    dmRef = db.ref(`dms/${state.userId}/messages`);
+    dmRef.on('value', snap => {
+      state.myDmMessages = snap.val() || {};
+      render();
+    });
+  }
+}
+function detachDmListener(){
+  if(dmRef){ dmRef.off(); dmRef = null; }
+  state.myDmMessages = {};
+  state.dmAllThreads = {};
+  state.dmOpenUid = null;
+}
+function currentDmMessages(){
+  if(state.isAdmin){
+    const thread = state.dmOpenUid && state.dmAllThreads[state.dmOpenUid];
+    return (thread && thread.messages) || {};
+  }
+  return state.myDmMessages;
+}
+function sortedDmMessages(){
+  const msgs = currentDmMessages();
+  return Object.keys(msgs)
+    .map(k => Object.assign({key: k}, msgs[k]))
+    .sort((a,b) => (a.at||0) - (b.at||0));
+}
+function dmThreadPreview(uid){
+  const thread = state.dmAllThreads[uid] || {};
+  const msgs = Object.keys(thread.messages || {}).map(k => thread.messages[k]).sort((a,b)=>(a.at||0)-(b.at||0));
+  const last = msgs[msgs.length-1];
+  const reporterMsg = msgs.find(m => !m.byBuilder && m.name);
+  return {
+    name: (reporterMsg && reporterMsg.name) || 'User',
+    lastText: last ? last.text : '',
+    lastAt: last ? (last.at||0) : 0
+  };
+}
+function sendDmMessage(text, opts){
+  if(!FB_READY || !state.userId) return;
+  opts = opts || {};
+  const trimmed = (text||'').trim();
+  if(!trimmed) return;
+  const targetUid = state.isAdmin ? state.dmOpenUid : state.userId;
+  if(!targetUid) return;
+  const key = opts.retryKey || ('m' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+  const existing = state.isAdmin
+    ? (state.dmAllThreads[targetUid] && state.dmAllThreads[targetUid].messages && state.dmAllThreads[targetUid].messages[key])
+    : state.myDmMessages[key];
+  const existingAt = opts.retryKey && existing ? existing.at : null;
+  const msg = {uid: state.userId, byBuilder: state.isAdmin, name: state.isAdmin ? 'Builder' : state.name, text: trimmed, at: existingAt || Date.now(), pending: true};
+  updateDmMessageLocal(targetUid, key, msg);
+  render();
+  const toSend = Object.assign({}, msg, {at: existingAt ? existingAt : firebase.database.ServerValue.TIMESTAMP});
+  delete toSend.pending;
+  db.ref(`dms/${targetUid}/messages/${key}`).set(toSend)
+    .then(() => {
+      const cleared = Object.assign({}, msg);
+      delete cleared.pending; delete cleared.failed;
+      updateDmMessageLocal(targetUid, key, cleared);
+      render();
+    })
+    .catch(err => {
+      console.error('Failed to send message:', err);
+      const failed = Object.assign({}, msg, {failed: true});
+      delete failed.pending;
+      updateDmMessageLocal(targetUid, key, failed);
+      render();
+    });
+}
+function updateDmMessageLocal(targetUid, key, msg){
+  if(state.isAdmin){
+    const thread = state.dmAllThreads[targetUid] || {};
+    state.dmAllThreads = Object.assign({}, state.dmAllThreads, {
+      [targetUid]: Object.assign({}, thread, {messages: Object.assign({}, thread.messages, {[key]: msg})})
+    });
+  } else {
+    state.myDmMessages = Object.assign({}, state.myDmMessages, {[key]: msg});
+  }
+}
+function sendCurrentChatMessage(text, opts){
+  const scope = state.chatScope || 'crew';
+  if(scope === 'global') sendGlobalChatMessage(text, opts);
+  else if(scope === 'dm') sendDmMessage(text, opts);
+  else sendChatMessage(text, opts);
+}
+
 let galleryRef = null;
 function attachGalleryListener(){
   if(!FB_READY || !state.code) return;
@@ -2592,6 +2783,16 @@ function renderLiveCrewCards(){
    Chat tab
    --------------------------------------------------------------------- */
 function renderChatTab(){
+  const scope = state.chatScope || 'crew';
+  return `
+  <div class="viewtoggle chat-scope-toggle">
+    <button class="${scope==='crew'?'active':''}" data-action="set-chat-scope" data-scope="crew">My Crew</button>
+    <button class="${scope==='global'?'active':''}" data-action="set-chat-scope" data-scope="global">All Users</button>
+    <button class="${scope==='dm'?'active':''}" data-action="set-chat-scope" data-scope="dm">${state.isAdmin ? 'Inbox' : 'Message Builder'}</button>
+  </div>
+  ${scope==='crew' ? renderCrewChatBody() : scope==='global' ? renderGlobalChatBody() : renderDmBody()}`;
+}
+function renderCrewChatBody(){
   const msgs = sortedChatMessages();
   const rows = msgs.map(renderChatMessage).join('');
   const others = Object.keys(state.crewUsers).filter(uid => uid !== state.userId && state.crewUsers[uid].name);
@@ -2606,6 +2807,106 @@ function renderChatTab(){
       <div id="chatMentionSuggestions" class="chat-mention-suggestions"></div>
       <input id="chatInput" placeholder="Message your crew&hellip; (@ to tag)" value="${escapeHtml(state.chatDraft||'')}" maxlength="300" autocomplete="off">
       <button class="btn primary" data-action="send-chat" ${(state.chatDraft||'').trim() ? '' : 'disabled'}>Send</button>
+    </div>
+  </div>`;
+}
+function renderGlobalNamePicker(){
+  return `
+  <div class="onboard-card">
+    <div class="sheet-title">Pick a username</div>
+    <div class="sheet-sub">This is the only name other users see in All Users chat &mdash; separate from your crew name. Your real name and email are never shown here.</div>
+    ${state.globalNameError ? `<div class="err-text">${escapeHtml(state.globalNameError)}</div>` : ''}
+    <input id="globalNameInput" maxlength="20" placeholder="e.g. FestivalFox42" value="${escapeHtml(state.globalNameDraft||'')}">
+    <div style="height:12px"></div>
+    <button class="btn primary block" data-action="save-global-name">Save &amp; start chatting</button>
+  </div>`;
+}
+function renderGlobalChatBody(){
+  if(!state.isAdmin && (!state.globalName || state.editingGlobalName)){
+    return renderGlobalNamePicker();
+  }
+  const msgs = sortedGlobalChatMessages();
+  const rows = msgs.map(renderGlobalChatMessage).join('');
+  const myName = myGlobalDisplayName();
+  return `
+  <div class="chat-thread" id="chatThread">
+    <div class="chat-system">You're chatting as <strong>${escapeHtml(myName)}</strong>${state.isAdmin ? '' : ` &middot; <button class="link-btn" data-action="edit-global-name">change username</button>`}. Your real name and email are never shown here.</div>
+    ${rows || '<div class="empty-state">No messages yet — say hi to everyone at Boomtown!</div>'}
+  </div>
+  <div class="chat-composer">
+    <div class="chat-input-row">
+      <input id="chatInput" placeholder="Message everyone&hellip;" value="${escapeHtml(state.chatDraft||'')}" maxlength="300" autocomplete="off">
+      <button class="btn primary" data-action="send-chat" ${(state.chatDraft||'').trim() ? '' : 'disabled'}>Send</button>
+    </div>
+  </div>`;
+}
+function renderGlobalChatMessage(msg){
+  const isMe = msg.uid === state.userId;
+  const isBuilder = ADMIN_UIDS.has(msg.uid);
+  const timeHtml = `<div class="chat-time">${escapeHtml(formatClockTime(msg.at))}</div>`;
+  const statusHtml = msg.failed
+    ? `<div class="chat-status failed">Not sent <button class="link-btn" style="padding:0 0 0 4px;" data-action="retry-global-message" data-key="${msg.key}">Retry</button></div>`
+    : (msg.pending ? `<div class="chat-status">Sending&hellip;</div>` : '');
+  return `
+  <div class="chat-msg ${isMe?'me':''}">
+    <div class="chat-bubble">
+      ${!isMe?`<div class="chat-sender">${escapeHtml(msg.name||'?')}${isBuilder?' <span class="builder-badge">BUILDER</span>':''}</div>`:''}
+      <div class="chat-text">${escapeHtml(msg.text)}</div>
+      ${timeHtml}
+      ${statusHtml}
+    </div>
+  </div>`;
+}
+function renderDmBody(){
+  if(state.isAdmin){
+    if(!state.dmOpenUid) return renderDmThreadList();
+    return renderDmThread(true);
+  }
+  return renderDmThread(false);
+}
+function renderDmThreadList(){
+  const uids = Object.keys(state.dmAllThreads);
+  if(!uids.length) return `<div class="empty-state">No messages yet. Anyone who messages you here shows up in this inbox.</div>`;
+  const previews = uids.map(uid => Object.assign({uid}, dmThreadPreview(uid))).sort((a,b)=>b.lastAt-a.lastAt);
+  const rows = previews.map(p => `
+    <div class="member-row" data-action="open-dm-thread" data-uid="${p.uid}" style="cursor:pointer;">
+      <div style="flex:1;">
+        <div class="member-name">${escapeHtml(p.name)}</div>
+        <div style="color:var(--text-dim);font-size:12px;">${escapeHtml((p.lastText||'').slice(0,60))}</div>
+      </div>
+    </div>`).join('');
+  return `<div class="chat-thread">${rows}</div>`;
+}
+function renderDmThread(isAdminView){
+  const msgs = sortedDmMessages();
+  const rows = msgs.map(renderDmMessage).join('');
+  const title = isAdminView ? dmThreadPreview(state.dmOpenUid).name : 'The Builder';
+  return `
+  ${isAdminView ? `<div class="chat-system"><button class="link-btn" data-action="close-dm-thread">&larr; Inbox</button> &middot; ${escapeHtml(title)}</div>` : ''}
+  <div class="chat-thread" id="chatThread">
+    ${!isAdminView ? `<div class="chat-system">Private &middot; only you and the app builder can see this. Use it to report bugs or issues.</div>` : ''}
+    ${rows || '<div class="empty-state">No messages yet.</div>'}
+  </div>
+  <div class="chat-composer">
+    <div class="chat-input-row">
+      <input id="chatInput" placeholder="${isAdminView ? 'Reply&hellip;' : 'Message the builder&hellip;'}" value="${escapeHtml(state.chatDraft||'')}" maxlength="300" autocomplete="off">
+      <button class="btn primary" data-action="send-chat" ${(state.chatDraft||'').trim() ? '' : 'disabled'}>Send</button>
+    </div>
+  </div>`;
+}
+function renderDmMessage(msg){
+  const isMe = state.isAdmin ? !!msg.byBuilder : !msg.byBuilder;
+  const timeHtml = `<div class="chat-time">${escapeHtml(formatClockTime(msg.at))}</div>`;
+  const statusHtml = msg.failed
+    ? `<div class="chat-status failed">Not sent <button class="link-btn" style="padding:0 0 0 4px;" data-action="retry-dm-message" data-key="${msg.key}">Retry</button></div>`
+    : (msg.pending ? `<div class="chat-status">Sending&hellip;</div>` : '');
+  return `
+  <div class="chat-msg ${isMe?'me':''}">
+    <div class="chat-bubble">
+      ${!isMe?`<div class="chat-sender">${msg.byBuilder ? 'Builder' : escapeHtml(msg.name||'?')}</div>`:''}
+      <div class="chat-text">${escapeHtml(msg.text)}</div>
+      ${timeHtml}
+      ${statusHtml}
     </div>
   </div>`;
 }
@@ -3479,12 +3780,50 @@ document.addEventListener('click', function(e){
     case 'send-chat': {
       const input = document.getElementById('chatInput');
       const text = input ? input.value : state.chatDraft;
-      sendChatMessage(text);
+      sendCurrentChatMessage(text);
       state.chatDraft = '';
       state.chatMentionQuery = null;
       render();
       return;
     }
+    case 'set-chat-scope': {
+      const scope = btn.dataset.scope;
+      if(state.chatScope === scope) return;
+      if(state.chatScope === 'global') detachGlobalChatListener();
+      if(state.chatScope === 'dm') detachDmListener();
+      state.chatScope = scope;
+      state.chatDraft = '';
+      if(scope === 'global') attachGlobalChatListener();
+      if(scope === 'dm') attachDmListener();
+      render();
+      return;
+    }
+    case 'edit-global-name':
+      state.editingGlobalName = true;
+      state.globalNameDraft = state.globalName || '';
+      state.globalNameError = null;
+      render(); return;
+    case 'save-global-name': {
+      const input = document.getElementById('globalNameInput');
+      saveGlobalName(input ? input.value : state.globalNameDraft);
+      return;
+    }
+    case 'retry-global-message': {
+      const key = btn.dataset.key;
+      const msg = state.globalChatMessages[key];
+      if(msg) sendGlobalChatMessage(msg.text, {retryKey: key});
+      return;
+    }
+    case 'retry-dm-message': {
+      const key = btn.dataset.key;
+      const msg = currentDmMessages()[key];
+      if(msg) sendDmMessage(msg.text, {retryKey: key});
+      return;
+    }
+    case 'open-dm-thread':
+      state.dmOpenUid = btn.dataset.uid; render(); return;
+    case 'close-dm-thread':
+      state.dmOpenUid = null; render(); return;
   }
 });
 
@@ -3526,6 +3865,10 @@ document.addEventListener('input', function(e){
     const m = uptoCaret.match(/(?:^|\s)@([a-zA-Z0-9]*)$/);
     state.chatMentionQuery = m ? m[1] : null;
     updateChatMentionSuggestions();
+    return;
+  }
+  if(e.target.id === 'globalNameInput'){
+    state.globalNameDraft = e.target.value;
     return;
   }
   if(e.target.id === 'searchInput'){
@@ -3652,9 +3995,12 @@ document.addEventListener('keydown', function(e){
       doJoinCrew();
     }
     if(e.target.id === 'chatInput' && e.target.value.trim()){
-      sendChatMessage(e.target.value);
+      sendCurrentChatMessage(e.target.value);
       state.chatDraft = '';
       render();
+    }
+    if(e.target.id === 'globalNameInput' && e.target.value.trim()){
+      saveGlobalName(e.target.value);
     }
     if((e.target.id === 'usernameInput' || e.target.id === 'usernamePasswordInput' || e.target.id === 'usernameConfirmInput')){
       const btn = document.querySelector('[data-action="submit-username-auth"]');
@@ -3719,6 +4065,8 @@ if(FB_READY){
     } else {
       detachListeners();
       detachGlobalPicksListener();
+      detachGlobalChatListener();
+      detachDmListener();
       state.userId = null;
       state.code = null;
       state.crewUsers = {};
@@ -3730,6 +4078,9 @@ if(FB_READY){
       state.broadcastMsg = null;
       state.seenBroadcastId = null;
       state.weatherBanner = null;
+      state.chatScope = 'crew';
+      state.globalName = null;
+      state.editingGlobalName = false;
       state.usernameFormOpen = false;
       state.usernameFormMode = 'signin';
       state.usernameInput = '';
